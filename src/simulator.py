@@ -13,7 +13,6 @@ from src.das import compute_axial_strain_rate, DASResult
 from src.sampling import build_receiver_sampling
 from src.solver_numpy import run_elastic_solver_numpy, ElasticRunResult
 from src.solver_numba_fused import run_elastic_solver_numba_fused
-from src.solver_numba_tiled import run_elastic_solver_numba_tiled
 
 
 def run_forward_simulation(
@@ -53,15 +52,12 @@ def run_forward_simulation(
     snapshot_stride : int | None
         Save vz snapshots every snapshot_stride steps if provided.
     backend : str
-        Solver backend: "numpy", "numba_fused", or "numba_tiled".
+        Solver backend: "numpy" or "numba_fused".
     free_surface : bool
         Enable stress-free top boundary condition.
     """
     grid = model.grid
 
-    # ------------------------------------------------------------------
-    # Basic consistency checks
-    # ------------------------------------------------------------------
     if source.stf.nt != grid.nt:
         raise ValueError(
             f"Source STF nt={source.stf.nt} does not match grid.nt={grid.nt}."
@@ -75,22 +71,13 @@ def run_forward_simulation(
             f"Source indices ({source.ix}, {source.iz}) are outside the grid."
         )
 
-    # ------------------------------------------------------------------
-    # 1. Build staggered bilinear receiver extraction weights
-    # ------------------------------------------------------------------
     sampling = build_receiver_sampling(grid, receivers)
 
-    # ------------------------------------------------------------------
-    # 2. Expand source tensor into explicit solver histories
-    # ------------------------------------------------------------------
     stf_vals = source.stf.values
     stf_xx = stf_vals * source.m2d.Mxx
     stf_zz = stf_vals * source.m2d.Mzz
     stf_xz = stf_vals * source.m2d.Mxz
 
-    # ------------------------------------------------------------------
-    # 3. Run elastic solver
-    # ------------------------------------------------------------------
     if backend == "numpy":
         run_result = run_elastic_solver_numpy(
             vp=model.vp,
@@ -137,35 +124,9 @@ def run_forward_simulation(
             free_surface=free_surface,
         )
 
-    elif backend == "numba_tiled":
-        run_result = run_elastic_solver_numba_tiled(
-            vp=model.vp,
-            vs=model.vs,
-            rho=model.rho,
-            dx=grid.dx,
-            dz=grid.dz,
-            dt=grid.dt,
-            nt=grid.nt,
-            source_ix=source.ix,
-            source_iz=source.iz,
-            stf_xx=stf_xx,
-            stf_zz=stf_zz,
-            stf_xz=stf_xz,
-            receiver_sampling=sampling,
-            half_order=half_order,
-            use_ts_sfd=use_ts_sfd,
-            n_boundary=n_boundary,
-            gamma_s=gamma_s,
-            snapshot_stride=snapshot_stride,
-            free_surface=free_surface,
-        )
-
     else:
         raise ValueError(f"Unknown backend='{backend}'.")
 
-    # ------------------------------------------------------------------
-    # 4. Compute DAS observable
-    # ------------------------------------------------------------------
     das_result = compute_axial_strain_rate(
         vx=run_result.receiver_vx,
         vz=run_result.receiver_vz,

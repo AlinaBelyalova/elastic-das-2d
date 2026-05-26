@@ -167,9 +167,6 @@ def benchmark_case(
         free_surface=free_surface,
     )
 
-    # ------------------------------------------------------------------
-    # NumPy baseline
-    # ------------------------------------------------------------------
     print("Running NumPy backend (3 runs)...")
     run_np, das_np, t_np = run_timed(
         backend="numpy",
@@ -182,9 +179,6 @@ def benchmark_case(
         free_surface=free_surface,
     )
 
-    # ------------------------------------------------------------------
-    # Numba fused
-    # ------------------------------------------------------------------
     print("Running Numba fused backend (3 runs)...")
     run_fused, das_fused, t_fused = run_timed(
         backend="numba_fused",
@@ -197,24 +191,6 @@ def benchmark_case(
         free_surface=free_surface,
     )
 
-    # ------------------------------------------------------------------
-    # Numba tiled
-    # ------------------------------------------------------------------
-    print("Running Numba tiled backend (3 runs)...")
-    run_tiled, das_tiled, t_tiled = run_timed(
-        backend="numba_tiled",
-        model=model,
-        source=source,
-        receivers=receivers,
-        half_order=half_order,
-        use_ts_sfd=use_ts_sfd,
-        n_boundary=n_boundary,
-        free_surface=free_surface,
-    )
-
-    # ------------------------------------------------------------------
-    # Correctness
-    # ------------------------------------------------------------------
     print_correctness_against_numpy(
         label="Numba fused",
         run_np=run_np,
@@ -222,25 +198,13 @@ def benchmark_case(
         run_test=run_fused,
         das_test=das_fused,
     )
-    print_correctness_against_numpy(
-        label="Numba tiled",
-        run_np=run_np,
-        das_np=das_np,
-        run_test=run_tiled,
-        das_test=das_tiled,
-    )
 
-    # ------------------------------------------------------------------
-    # Runtime
-    # ------------------------------------------------------------------
     print("\n--- Runtime (best of 3) ---")
     print(f"NumPy       : {t_np:.3f} s")
     print(f"Numba fused : {t_fused:.3f} s")
-    print(f"Numba tiled : {t_tiled:.3f} s")
 
     print("\n--- Speedup over NumPy ---")
     print(f"Numba fused : {t_np / t_fused:.2f}x")
-    print(f"Numba tiled : {t_np / t_tiled:.2f}x")
 
 
 def main() -> None:
@@ -249,32 +213,31 @@ def main() -> None:
     N_BOUNDARY = 50
     TEST_NX, TEST_NZ, TEST_NT = 601, 601, 800
 
-    print("Warm-up Numba backends...")
-    for backend in ("numba_fused", "numba_tiled"):
-        for free_surface in (False, True):
-            warm = build_homogeneous_model(
-                nx=201,
-                nz=201,
-                nt=5,
-                half_order=HALF_ORDER,
-                use_ts_sfd=USE_TS_SFD,
-            )
-            warm_src, warm_rec = build_geometry(
-                warm,
-                n_pml=N_BOUNDARY,
-                free_surface=free_surface,
-            )
-            run_timed(
-                backend=backend,
-                model=warm,
-                source=warm_src,
-                receivers=warm_rec,
-                half_order=HALF_ORDER,
-                use_ts_sfd=USE_TS_SFD,
-                n_boundary=N_BOUNDARY,
-                free_surface=free_surface,
-                n_runs=1,
-            )
+    print("Warm-up Numba backend...")
+    for free_surface in (False, True):
+        warm = build_homogeneous_model(
+            nx=201,
+            nz=201,
+            nt=5,
+            half_order=HALF_ORDER,
+            use_ts_sfd=USE_TS_SFD,
+        )
+        warm_src, warm_rec = build_geometry(
+            warm,
+            n_pml=N_BOUNDARY,
+            free_surface=free_surface,
+        )
+        run_timed(
+            backend="numba_fused",
+            model=warm,
+            source=warm_src,
+            receivers=warm_rec,
+            half_order=HALF_ORDER,
+            use_ts_sfd=USE_TS_SFD,
+            n_boundary=N_BOUNDARY,
+            free_surface=free_surface,
+            n_runs=1,
+        )
 
     print(
         f"\nBenchmark setup: nx={TEST_NX}, nz={TEST_NZ}, nt={TEST_NT}, "

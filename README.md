@@ -1,43 +1,58 @@
-# 2D Elastic Forward Modelling for Borehole DAS
+# Elastic DAS Project
 
-This project develops a workflow for 2D elastic forward modelling in a borehole DAS setting inspired by the SAFOD geometry.
+Validated and accelerated 2D elastic finite-difference modelling for synthetic DAS.
 
-The immediate goal is to build and validate the modelling infrastructure:
-- define the computational grid,
-- construct a SAFOD-like elastic model,
-- represent the borehole DAS cable geometry,
-- and prepare the project for later wave-equation solving, source implementation, and benchmarking.
+## Project question
 
-The longer-term modelling target is elastic wave propagation from earthquake-like double-couple sources and the prediction of synthetic DAS responses along the borehole fibre.
+**Can a 2D staggered-grid elastic finite-difference solver for synthetic DAS be validated against an analytical reference and accelerated with Numba while preserving numerical correctness in a free-surface configuration?**
+
+## Overview
+
+This project implements a 2D isotropic elastic wave solver in the $((x, z))$ plane using a staggered-grid velocity-stress formulation.
+
+The main goals of the project are:
+
+- to build a physically consistent forward-modelling workflow for synthetic DAS,
+- to validate the numerical propagation engine against an analytical point-force reference,
+- to accelerate the solver with Numba while preserving agreement with a NumPy baseline.
+
+The project focuses on forward modelling, validation, and computational performance analysis rather than full inversion.
 
 ---
 
-## Current project status
+## Main components
 
-At the current stage, the repository includes:
-- a structured `Grid2D` class,
-- an `ElasticModel2D` class that computes Lamé parameters from `Vp`, `Vs`, and `rho`,
-- a SAFOD-like model builder based on projected cable geometry,
-- plotting utilities for model inspection,
-- a script that builds and saves the current synthetic model.
+### Solver
+- 2D first-order elastic velocity-stress formulation
+- Virieux-style staggered grid
+- explicit leapfrog time staggering
+- configurable spatial finite-difference order
+- free-surface boundary condition
+- NumPy baseline solver
+- Numba fused accelerated backend
 
-This is a **geologically informed simplified synthetic model**, not yet a fully realistic SAFOD truth model.
+### Source and receivers
+- double-couple moment-tensor source in 2D
+- DAS cable / receiver geometry
+- staggered-aware receiver sampling
+
+### DAS operator
+- axial strain-rate computation from receiver particle velocities
+- gauge-length differencing
+- projection onto the local cable tangent
+- physically consistent “difference first, then project” formulation
+
+### Validation and benchmarking
+- analytical point-force validation in a homogeneous medium
+- convergence study for spatial FD orders 2, 4, 6, 8
+- NumPy vs Numba fused performance comparison
+- runtime, speedup, and throughput scaling for `free_surface=True`
 
 ---
 
 ## Repository structure
 
 ```text
-elastic_das_project/
-├── README.md
-├── requirements.txt
-├── src/
-│   ├── __init__.py
-│   ├── grid.py
-│   ├── model.py
-│   ├── safod_builder.py
-│   └── plotting.py
-├── scripts/
-│   └── build_safod_model.py
-└── notebooks/
-    └── 01_build_safod_model.ipynb
+src/        core solver, source, DAS, model, sampling, and simulator modules
+scripts/    validation and performance study scripts
+notebooks/  demonstration notebook(s)
