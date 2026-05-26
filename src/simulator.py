@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.model import ElasticModel2D
-from src.source import DoubleCoupleSource2D
+from src.source import EmbeddedSource2D
 from src.receivers import Receivers2D
 from src.das import compute_axial_strain_rate, DASResult
 from src.sampling import build_receiver_sampling
@@ -17,7 +17,7 @@ from src.solver_numba_fused import run_elastic_solver_numba_fused
 
 def run_forward_simulation(
     model: ElasticModel2D,
-    source: DoubleCoupleSource2D,
+    source: EmbeddedSource2D,
     receivers: Receivers2D,
     gauge_length_m: float = 10.0,
     half_order: int = 2,
