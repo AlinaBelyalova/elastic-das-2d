@@ -2,10 +2,6 @@
 
 Validated and accelerated 2D elastic finite-difference modelling for synthetic DAS.
 
-## Project question
-
-**Can a 2D staggered-grid elastic finite-difference solver for synthetic DAS be validated against an analytical reference and accelerated with Numba while preserving numerical correctness in a free-surface configuration?**
-
 ## Overview
 
 This project implements a 2D isotropic elastic wave solver in the $((x, z))$ plane using a staggered-grid velocity-stress formulation.
