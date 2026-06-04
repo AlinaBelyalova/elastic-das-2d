@@ -335,7 +335,7 @@ def main() -> None:
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(outdir / "pointforce_validation_traces_zoom.png", dpi=200)
+    plt.savefig(outdir / "pointforce_validation_traces_zoom.png", dpi=300)
     plt.close()
 
     # ------------------------------------------------------------------
@@ -345,7 +345,7 @@ def main() -> None:
     ax.plot(spatial_orders, rel_l2_errors, "o-")
     ax.set_yscale("log")
     ax.set_xlabel("Spatial FD order")
-    ax.set_ylabel(r"Relative $L_2$ error (receiver $v_z$ only)")
+    ax.set_ylabel(r"$L_2$ error ($v_z$)")
     ax.set_title(r"Convergence: $\|v^{num} - v^{analytic}\|_2 / \|v^{analytic}\|_2$")
     ax.grid(True, which="both", alpha=0.3)
 
