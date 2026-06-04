@@ -1,18 +1,21 @@
 # ==============================================================================
-# scripts/run_numpy_homogeneous.py
+# scripts/run_homogeneous_demo.py
 #
-# Final homogeneous validation script for the 2D elastic + DAS pipeline.
+# Final homogeneous validation/demo script for the 2D elastic + DAS pipeline.
 #
 # Includes:
 #   1. Homogeneous elastic model
 #   2. Physical double-couple source run
-#   3. Permanent explosive validation run
+#   3. Explosive-like sanity-check run
 #   4. Straight DAS cable
 #   5. Staggered-aware receiver extraction
 #   6. DAS strain-rate output
 #   7. Raw and trace-normalized gathers
 #   8. Rough travel-time validation
 #   9. Wavefield animation saved as MP4 or GIF
+#
+# Final setting:
+#   free_surface=True
 # ==============================================================================
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from scipy.signal import hilbert
 
 from src.grid import Grid2D
 from src.model import ElasticModel2D
-from src.source import build_dc_source, DoubleCoupleSource2D
+from src.source import build_dc_source, EmbeddedSource2D
 from src.receivers import build_das_cable, Receivers2D
 from src.simulator import run_forward_simulation
 from src.sampling import build_receiver_sampling
@@ -52,7 +55,14 @@ def build_homogeneous_model(
     """
     Build a homogeneous elastic model with a CFL-safe timestep.
     """
-    dt = cfl_safety * max_stable_dt(vp, dx, dz, half_order)
+    dt = max_stable_dt(
+        vp,
+        dx,
+        dz,
+        half_order,
+        safety=cfl_safety,
+        use_ts_sfd=False,
+    )
 
     grid = Grid2D(
         nx=nx,
@@ -75,13 +85,13 @@ def build_homogeneous_model(
 def build_geometry(
     model: ElasticModel2D,
     n_pml: int,
-) -> tuple[DoubleCoupleSource2D, Receivers2D]:
+) -> tuple[EmbeddedSource2D, Receivers2D]:
     """
     Build the physical 2D double-couple source and a straight vertical DAS cable.
     """
     grid = model.grid
 
-    # Source roughly left-of-centre
+    # Source roughly left-of-centre and safely below the free surface.
     x_src = grid.x[grid.nx // 3]
     z_src = grid.z[grid.nz // 2]
 
@@ -97,7 +107,7 @@ def build_geometry(
         derivative_order=0,
     )
 
-    # Keep cable safely inside the non-PML region
+    # Keep cable safely inside the non-sponge region.
     ix_cable = grid.nx - n_pml - 25
     iz_top = n_pml + 10
     iz_bot = grid.nz - n_pml - 10
@@ -124,7 +134,7 @@ def build_explosive_validation_source(
     amplitude: float = 1.0e10,
 ) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Build a simple isotropic / explosive-like stress source for permanent validation.
+    Build a simple isotropic / explosive-like stress source for sanity checking.
     """
     grid = model.grid
 
@@ -504,9 +514,10 @@ def run_explosive_validation(
     n_boundary: int = 50,
     gamma_s: float = 50.0,
     snapshot_stride: int = 100,
+    free_surface: bool = True,
 ):
     """
-    Permanent sanity-check run with a simple isotropic stress source.
+    Sanity-check run with a simple isotropic stress source.
     """
     grid = model.grid
     sampling = build_receiver_sampling(grid, receivers)
@@ -532,6 +543,7 @@ def run_explosive_validation(
         n_boundary=n_boundary,
         gamma_s=gamma_s,
         snapshot_stride=snapshot_stride,
+        free_surface=free_surface,
     )
 
     class DummySource:
@@ -555,15 +567,18 @@ def main() -> None:
     # Fixed baseline parameters
     half_order = 2
     use_ts_sfd = False
+    free_surface = True
+
     vp0 = 3000.0
     vs0 = 1700.0
     rho0 = 2500.0
+
     n_boundary = 50
     gamma_s = 50.0
     snapshot_stride = 100
     gauge_length_m = 20.0
 
-    out_dir = Path("results/run_numpy_homogeneous_baseline")
+    out_dir = Path("results/run_homogeneous_demo_free_surface")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Building model and geometry...")
@@ -579,6 +594,7 @@ def main() -> None:
     print(f"Source placed at X={source.x_embedded_m:.1f} m, Z={source.z_embedded_m:.1f} m")
     print(f"Receivers: {receivers.nrec} channels")
     print(f"half_order = {half_order}, use_ts_sfd = {use_ts_sfd}")
+    print(f"free_surface = {free_surface}")
     print(f"f0 = 8.0 Hz, n_boundary = {n_boundary}, gamma_s = {gamma_s}")
     print(f"Output directory: {out_dir}")
 
@@ -596,6 +612,8 @@ def main() -> None:
         n_boundary=n_boundary,
         gamma_s=gamma_s,
         snapshot_stride=snapshot_stride,
+        backend="numba_fused", # "numpy" or "numba_fused"
+        free_surface=free_surface,
     )
     print("Double-couple simulation finished.")
 
@@ -652,7 +670,7 @@ def main() -> None:
         receivers=receivers,
         run_result=run_result,
         out_stem=out_dir / "double_couple_wavefield",
-        title_prefix="double_couple",
+        title_prefix="double_couple_free_surface",
         fps=6,
         pclip=99.0,
     )
@@ -671,6 +689,7 @@ def main() -> None:
         receiver_s=receivers.s,
         source_x=source.x_embedded_m,
         source_z=source.z_embedded_m,
+        free_surface=free_surface,
     )
 
     channel_ids = [0, receivers.nrec // 2, receivers.nrec - 1]
@@ -685,7 +704,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 2. Permanent validation run: simple explosive source
+    # 2. Sanity-check run: simple explosive-like source
     # ------------------------------------------------------------------
     validation_dir = out_dir / "explosive_validation"
     validation_dir.mkdir(parents=True, exist_ok=True)
@@ -698,6 +717,7 @@ def main() -> None:
         n_boundary=n_boundary,
         gamma_s=gamma_s,
         snapshot_stride=snapshot_stride,
+        free_surface=free_surface,
     )
     print("Explosive validation simulation finished.")
 
@@ -738,7 +758,7 @@ def main() -> None:
         receivers=receivers,
         run_result=val_run_result,
         out_stem=validation_dir / "explosive_wavefield",
-        title_prefix="explosive",
+        title_prefix="explosive_free_surface",
         fps=6,
         pclip=99.0,
     )
@@ -753,6 +773,7 @@ def main() -> None:
         receiver_s=receivers.s,
         source_x=val_source.x_embedded_m,
         source_z=val_source.z_embedded_m,
+        free_surface=free_surface,
     )
 
     print(f"\nPipeline complete. All results saved to: {out_dir.absolute()}")
