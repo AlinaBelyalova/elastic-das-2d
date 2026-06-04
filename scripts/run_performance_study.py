@@ -57,9 +57,16 @@ def build_homogeneous_model(
     use_ts_sfd: bool = False,
 ) -> ElasticModel2D:
     """Build a homogeneous elastic model for performance benchmarking."""
-    dt = cfl_safety * max_stable_dt(
-        vp, dx, dz, half_order, use_ts_sfd=use_ts_sfd
+
+    dt = max_stable_dt(
+        vp,
+        dx,
+        dz,
+        half_order,
+        safety=cfl_safety,
+        use_ts_sfd=use_ts_sfd,
     )
+
     grid = Grid2D(
         nx=nx,
         nz=nz,
