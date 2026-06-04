@@ -1,15 +1,28 @@
+# Python cache
 __pycache__/
 *.py[cod]
-.ipynb_checkpoints/
-.DS_Store
-.env
+*$py.class
+
+# Virtual environments
+.env/
 .venv/
 venv/
-configs/
-notebooks/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# Results and generated outputs
 results/
-build/
-dist/
-*.egg-info/
 *.npz
 *.npy
+*.gif
+*.mp4
+
+# OS files
+.DS_Store
+
+# Numba cache
+*.nbc
+*.nbi
