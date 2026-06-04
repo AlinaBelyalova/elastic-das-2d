@@ -35,8 +35,8 @@ def run_forward_simulation(
     ----------
     model : ElasticModel2D
         Elastic medium model and computational grid.
-    source : DoubleCoupleSource2D
-        Double-couple moment-tensor source.
+    source : EmbeddedSource2D
+        Embedded 2D moment-tensor source.
     receivers : Receivers2D
         Receiver geometry.
     gauge_length_m : float

@@ -25,9 +25,16 @@ def build_homogeneous_model(
     half_order: int = 2,
     use_ts_sfd: bool = False,
 ) -> ElasticModel2D:
-    dt = cfl_safety * max_stable_dt(
-        vp, dx, dz, half_order, use_ts_sfd=use_ts_sfd
+
+    dt = max_stable_dt(
+        vp,
+        dx,
+        dz,
+        half_order,
+        safety=cfl_safety,
+        use_ts_sfd=use_ts_sfd,
     )
+
     grid = Grid2D(nx=nx, nz=nz, dx=dx, dz=dz, nt=nt, dt=dt, x0=0.0, z0=0.0)
     return ElasticModel2D(
         grid=grid,
