@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from src.model import ElasticModel2D
@@ -11,6 +13,7 @@ from src.source import EmbeddedSource2D
 from src.receivers import Receivers2D
 from src.das import compute_axial_strain_rate, DASResult
 from src.sampling import build_receiver_sampling
+from src.source_injection import build_stress_source_injection
 from src.solver_numpy import run_elastic_solver_numpy, ElasticRunResult
 from src.solver_numba_fused import run_elastic_solver_numba_fused
 
@@ -25,11 +28,11 @@ def run_forward_simulation(
     n_boundary: int = 40,
     gamma_s: float = 300.0,
     snapshot_stride: int | None = None,
-    backend: str = "numpy",
+    backend: str = "numba_fused",
     free_surface: bool = False,
 ) -> tuple[ElasticRunResult, DASResult]:
     """
-    Run the full elastic forward simulation and post-process it into DAS strain-rate.
+    Run the full elastic forward simulation and post-process into DAS strain-rate.
 
     Parameters
     ----------
@@ -37,22 +40,26 @@ def run_forward_simulation(
         Elastic medium model and computational grid.
     source : EmbeddedSource2D
         Embedded 2D moment-tensor source.
+        source.spreading controls injection mode:
+          "nearest"  — snap to nearest stress-grid node (fast, default)
+          "bilinear" — distribute onto four surrounding nodes (for off-grid sources)
     receivers : Receivers2D
         Receiver geometry.
     gauge_length_m : float
-        DAS gauge length used in axial strain-rate post-processing.
+        DAS gauge length [m].
     half_order : int
         Spatial half-order M (spatial FD order = 2M).
     use_ts_sfd : bool
-        Use TS-SFD coefficients instead of classical Taylor coefficients.
+        Use TS-SFD coefficients instead of Taylor coefficients.
     n_boundary : int
         Sponge layer width in grid cells.
     gamma_s : float
         Sponge damping coefficient.
-    snapshot_stride : int | None
-        Save vz snapshots every snapshot_stride steps if provided.
+    snapshot_stride : int or None
+        Save vz snapshots every snapshot_stride steps.
     backend : str
-        Solver backend: "numpy" or "numba_fused".
+        Solver backend: "numba_fused" (default) or "numpy" (reference/debug).
+        Bilinear spreading is only supported for "numba_fused".
     free_surface : bool
         Enable stress-free top boundary condition.
     """
@@ -74,11 +81,47 @@ def run_forward_simulation(
     sampling = build_receiver_sampling(grid, receivers)
 
     stf_vals = source.stf.values
-    stf_xx = stf_vals * source.m2d.Mxx
-    stf_zz = stf_vals * source.m2d.Mzz
-    stf_xz = stf_vals * source.m2d.Mxz
+    stf_xx   = stf_vals * source.m2d.Mxx
+    stf_zz   = stf_vals * source.m2d.Mzz
+    stf_xz   = stf_vals * source.m2d.Mxz
 
-    if backend == "numpy":
+    if backend == "numba_fused":
+        # Build solver-ready injection arrays (nearest or bilinear, same API).
+        # Only built for numba_fused; numpy backend is frozen and uses ix/iz directly.
+        injection = build_stress_source_injection(source, grid)
+
+        run_result = run_elastic_solver_numba_fused(
+            vp=model.vp,
+            vs=model.vs,
+            rho=model.rho,
+            dx=grid.dx,
+            dz=grid.dz,
+            dt=grid.dt,
+            nt=grid.nt,
+            source_ix=source.ix,
+            source_iz=source.iz,
+            stf_xx=stf_xx,
+            stf_zz=stf_zz,
+            stf_xz=stf_xz,
+            receiver_sampling=sampling,
+            half_order=half_order,
+            use_ts_sfd=use_ts_sfd,
+            n_boundary=n_boundary,
+            gamma_s=gamma_s,
+            snapshot_stride=snapshot_stride,
+            free_surface=free_surface,
+            source_injection=injection,
+        )
+
+    elif backend == "numpy":
+        if source.spreading == "bilinear":
+            warnings.warn(
+                "source.spreading='bilinear' is not supported by the numpy backend. "
+                "Falling back to nearest-node injection. "
+                "Use backend='numba_fused' for bilinear spreading.",
+                UserWarning,
+                stacklevel=2,
+            )
         run_result = run_elastic_solver_numpy(
             vp=model.vp,
             vs=model.vs,
@@ -101,31 +144,10 @@ def run_forward_simulation(
             free_surface=free_surface,
         )
 
-    elif backend == "numba_fused":
-        run_result = run_elastic_solver_numba_fused(
-            vp=model.vp,
-            vs=model.vs,
-            rho=model.rho,
-            dx=grid.dx,
-            dz=grid.dz,
-            dt=grid.dt,
-            nt=grid.nt,
-            source_ix=source.ix,
-            source_iz=source.iz,
-            stf_xx=stf_xx,
-            stf_zz=stf_zz,
-            stf_xz=stf_xz,
-            receiver_sampling=sampling,
-            half_order=half_order,
-            use_ts_sfd=use_ts_sfd,
-            n_boundary=n_boundary,
-            gamma_s=gamma_s,
-            snapshot_stride=snapshot_stride,
-            free_surface=free_surface,
-        )
-
     else:
-        raise ValueError(f"Unknown backend='{backend}'.")
+        raise ValueError(
+            f"Unknown backend='{backend}'. Valid options: 'numba_fused', 'numpy'."
+        )
 
     das_result = compute_axial_strain_rate(
         vx=run_result.receiver_vx,
