@@ -36,6 +36,7 @@ from src.solver_numpy import (
     ElasticRunResult,
 )
 from src.sampling import ReceiverSampling2D
+from src.source_injection import StressSourceInjection
 
 
 # ==============================================================================
@@ -276,9 +277,11 @@ def inject_source_numba(
     amp_xz: float,
 ) -> None:
     """
-    Source injection consistent with the NumPy baseline:
-      - sxx, szz injected at (ix, iz)
-      - sxz distributed over four surrounding nodes with equal weights
+    Legacy nearest-node source injection.
+
+    Kept for reference only. The production solver uses inject_stress_source_numba,
+    which handles both "nearest" and "bilinear" spreading via StressSourceInjection
+    arrays. Do not call this function from the main time loop.
     """
     sxx[ix, iz] += amp_xx
     szz[ix, iz] += amp_zz
@@ -288,6 +291,40 @@ def inject_source_numba(
     sxz[ix - 1, iz    ] += q
     sxz[ix,     iz - 1] += q
     sxz[ix - 1, iz - 1] += q
+
+
+@njit(fastmath=True, cache=True)
+def inject_stress_source_numba(
+    sxx: np.ndarray,
+    szz: np.ndarray,
+    sxz: np.ndarray,
+    normal_ix: np.ndarray,
+    normal_iz: np.ndarray,
+    normal_w:  np.ndarray,
+    shear_ix:  np.ndarray,
+    shear_iz:  np.ndarray,
+    shear_w:   np.ndarray,
+    amp_xx: float,
+    amp_zz: float,
+    amp_xz: float,
+) -> None:
+    """
+    Unified stress source injection kernel.
+
+    sxx and szz use the normal-stress stencil (integer grid).
+    sxz uses the shear-stress stencil (half-integer grid).
+    Each stencil has 4 nodes with weights summing to 1.0.
+
+    Works for both spreading modes without branching:
+      spreading="nearest"  → normal_w=[1,0,0,0], shear_w=[0.25,...] (equal centroid)
+      spreading="bilinear" → arbitrary bilinear weights from physical position
+
+    Weights are encoded in StressSourceInjection; no division by 4 here.
+    """
+    for k in range(4):
+        sxx[normal_ix[k], normal_iz[k]] += amp_xx * normal_w[k]
+        szz[normal_ix[k], normal_iz[k]] += amp_zz * normal_w[k]
+        sxz[shear_ix[k],  shear_iz[k] ] += amp_xz * shear_w[k]
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -382,6 +419,7 @@ def run_elastic_solver_numba_fused(
     gamma_s: float = 300.0,
     snapshot_stride: int | None = None,
     free_surface: bool = False,
+    source_injection: StressSourceInjection | None = None,
 ) -> ElasticRunResult:
     """
     Numba-accelerated elastic solver with fused explicit loops.
@@ -403,6 +441,13 @@ def run_elastic_solver_numba_fused(
       - velocity ghost fill before velocity update
       - Graves correction at j=M
       - stress ghost mirroring after stress update
+
+    source_injection
+    ----------------
+    Pre-built StressSourceInjection containing plain numpy arrays (shape (4,))
+    for each stress component. Both "nearest" and "bilinear" spreading modes
+    produce the same array format; the same injection kernel handles both.
+    If None: legacy fallback arrays are built from source_ix/source_iz.
     """
     vp  = np.asarray(vp,  dtype=np.float64)
     vs  = np.asarray(vs,  dtype=np.float64)
@@ -530,6 +575,28 @@ def run_elastic_solver_numba_fused(
     ix = int(source_ix)
     iz = int(source_iz)
 
+    # ── source injection arrays ────────────────────────────────────────────────
+    # source_injection holds plain numpy arrays (int64/float64, shape (4,)).
+    # If not provided, build the nearest-node equivalent on the fly:
+    #   normal stencil → w=[1,0,0,0] (point injection at ix, iz)
+    #   shear  stencil → w=[0.25,...] (centroid correction)
+    # Both cases use the same inject_stress_source_numba kernel.
+    if source_injection is not None:
+        _normal_ix = source_injection.normal_ix
+        _normal_iz = source_injection.normal_iz
+        _normal_w  = source_injection.normal_w
+        _shear_ix  = source_injection.shear_ix
+        _shear_iz  = source_injection.shear_iz
+        _shear_w   = source_injection.shear_w
+    else:
+        # Legacy fallback: nearest-node equivalent via hard-coded arrays
+        _normal_ix = np.array([ix,     ix + 1, ix,     ix + 1], dtype=np.int64)
+        _normal_iz = np.array([iz,     iz,     iz + 1, iz + 1], dtype=np.int64)
+        _normal_w  = np.array([1.0,    0.0,    0.0,    0.0   ], dtype=np.float64)
+        _shear_ix  = np.array([ix - 1, ix,     ix - 1, ix    ], dtype=np.int64)
+        _shear_iz  = np.array([iz - 1, iz - 1, iz,     iz    ], dtype=np.int64)
+        _shear_w   = np.array([0.25,   0.25,   0.25,   0.25  ], dtype=np.float64)
+
     # ── leapfrog time loop ─────────────────────────────────────────────────────
     for it in range(nt):
         # 0. Free-surface ghost-node velocity fill
@@ -553,8 +620,10 @@ def run_elastic_solver_numba_fused(
             )
 
         # 3. Source injection into updated stress at t_sigma[it+1]
-        inject_source_numba(
-            sxx, szz, sxz, ix, iz,
+        inject_stress_source_numba(
+            sxx, szz, sxz,
+            _normal_ix, _normal_iz, _normal_w,
+            _shear_ix,  _shear_iz,  _shear_w,
             stf_xx[it] * src_scale,
             stf_zz[it] * src_scale,
             stf_xz[it] * src_scale,
