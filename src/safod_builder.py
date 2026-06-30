@@ -382,8 +382,8 @@ def _add_pilot_hole_lvz(
     return vp2, vs2, rho2
 
 
-def _fault_x_at_z(
-    z: np.ndarray,
+def fault_x_at_z(
+    z: float | np.ndarray,
     *,
     x_tie_m: float,
     z_tie_m: float,
@@ -391,16 +391,36 @@ def _fault_x_at_z(
     fault_dip_sign: float,
 ) -> np.ndarray:
     """
-    Compute x-coordinate of dipping fault line at depths z.
+    Compute x-coordinate of the SAF prior line at depth(s) z.
+
+    Formula:
+        x_fault(z) = x_tie + fault_dip_sign * (z - z_tie) / tan(dip)
+
+    Parameters
+    ----------
+    z
+        Depth-positive coordinate(s) [m].
+    x_tie_m, z_tie_m
+        Fault tie point [m].
+    fault_dip_deg
+        Fault dip in degrees from horizontal. Near-vertical SAF is close to 90.
+    fault_dip_sign
+        Controls apparent dip direction in the 2D section.
+
+    Returns
+    -------
+    x_fault
+        Fault x-coordinate(s) [m].
     """
     if not (0.0 < fault_dip_deg < 90.0):
         raise ValueError(
             f"fault_dip_deg must be in (0, 90), got {fault_dip_deg}."
         )
 
+    z_arr = np.asarray(z, dtype=np.float64)
     dip_rad = np.deg2rad(fault_dip_deg)
 
-    return x_tie_m + fault_dip_sign * (z - z_tie_m) / np.tan(dip_rad)
+    return x_tie_m + fault_dip_sign * (z_arr - z_tie_m) / np.tan(dip_rad)
 
 
 def _apply_cross_fault_contrast(
@@ -431,7 +451,7 @@ def _apply_cross_fault_contrast(
             f"transition_width_m must be positive, got {transition_width_m}."
         )
 
-    x_fault = _fault_x_at_z(
+    x_fault = fault_x_at_z(
         Z,
         x_tie_m=x_tie_m,
         z_tie_m=z_tie_m,
@@ -478,7 +498,7 @@ def _apply_fault_damage_zone(
             f"velocity_reduction must be in [0, 1), got {velocity_reduction}."
         )
 
-    x_fault = _fault_x_at_z(
+    x_fault = fault_x_at_z(
         Z,
         x_tie_m=x_tie_m,
         z_tie_m=z_tie_m,
@@ -695,7 +715,7 @@ def build_safod_model(
     z1_m = math.ceil(float(z_max_m) / dz) * dz
 
     z_fault_line = np.linspace(z0_m, z1_m, 700)
-    x_fault_line = _fault_x_at_z(
+    x_fault_line = fault_x_at_z(
         z_fault_line,
         x_tie_m=x_tie_m,
         z_tie_m=float(z_tie_m),
