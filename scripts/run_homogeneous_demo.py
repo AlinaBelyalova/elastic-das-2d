@@ -1,18 +1,23 @@
 # ==============================================================================
 # scripts/run_homogeneous_demo.py
 #
-# Final homogeneous validation/demo script for the 2D elastic + DAS pipeline.
+# Homogeneous validation/demo script for the 2D elastic + DAS pipeline.
 #
-# Includes:
+# Main production run:
 #   1. Homogeneous elastic model
-#   2. Physical double-couple source run
-#   3. Explosive-like sanity-check run
-#   4. Straight DAS cable
-#   5. Staggered-aware receiver extraction
-#   6. DAS strain-rate output
-#   7. Raw and trace-normalized gathers
-#   8. Rough travel-time validation
-#   9. Wavefield animation saved as MP4 or GIF
+#   2. Physical double-couple source
+#   3. Off-grid source position
+#   4. spreading="bilinear"
+#   5. backend="numba_fused"
+#   6. Straight DAS cable
+#   7. Staggered-aware receiver extraction
+#   8. DAS strain-rate output
+#   9. Raw and trace-normalized gathers
+#   10. Rough travel-time validation
+#   11. Wavefield animation saved as MP4 or GIF
+#
+# Secondary sanity run:
+#   - Explosive-like stress source using the frozen NumPy reference solver.
 #
 # Final setting:
 #   free_surface=True
@@ -21,6 +26,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
@@ -88,12 +94,21 @@ def build_geometry(
 ) -> tuple[EmbeddedSource2D, Receivers2D]:
     """
     Build the physical 2D double-couple source and a straight vertical DAS cable.
+
+    The source is deliberately placed off-grid and uses spreading="bilinear".
+    This exercises the new production source path:
+
+        source.py
+        -> source_spreading.py
+        -> source_injection.py
+        -> solver_numba_fused.py
     """
     grid = model.grid
 
     # Source roughly left-of-centre and safely below the free surface.
-    x_src = grid.x[grid.nx // 3]
-    z_src = grid.z[grid.nz // 2]
+    # Deliberately off-grid to test bilinear source spreading.
+    x_src = float(grid.x[grid.nx // 3] + 0.37 * grid.dx)
+    z_src = float(grid.z[grid.nz // 2] + 0.61 * grid.dz)
 
     source = build_dc_source(
         grid=grid,
@@ -105,6 +120,7 @@ def build_geometry(
         dt=grid.dt,
         f0_hz=8.0,
         derivative_order=0,
+        spreading="bilinear",
     )
 
     # Keep cable safely inside the non-sponge region.
@@ -135,6 +151,9 @@ def build_explosive_validation_source(
 ) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray]:
     """
     Build a simple isotropic / explosive-like stress source for sanity checking.
+
+    This intentionally uses the old integer-grid source convention because it is
+    run through the frozen NumPy reference backend.
     """
     grid = model.grid
 
@@ -189,12 +208,18 @@ def plot_model_geometry(
     fig.colorbar(im, ax=ax, label="Vp [m/s]")
 
     ax.plot(receivers.x, receivers.z, "w-", lw=2, label="DAS cable")
-    ax.scatter(source.x_embedded_m, source.z_embedded_m, c="red", s=60, label="Source")
+    ax.scatter(
+        source.x_embedded_m,
+        source.z_embedded_m,
+        c="red",
+        s=60,
+        label="Bilinear DC source",
+    )
 
     ax.invert_yaxis()
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Depth [m]")
-    ax.set_title("Homogeneous model with source and DAS cable")
+    ax.set_title("Homogeneous model with off-grid source and DAS cable")
     ax.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(out_dir / filename, dpi=200, bbox_inches="tight")
@@ -213,7 +238,7 @@ def plot_receiver_gather(
     extent = [t[0], t[-1], receivers.s[-1], receivers.s[0]]
 
     vmax = np.percentile(np.abs(data), 99.0)
-    if vmax == 0.0:
+    if vmax == 0.0 or not np.isfinite(vmax):
         vmax = 1.0
 
     im = ax.imshow(
@@ -280,7 +305,7 @@ def plot_das_gather(
     extent = [t[0], t[-1], s_valid[-1], s_valid[0]]
 
     vmax = np.percentile(np.abs(das_result.data), 99.0)
-    if vmax == 0.0:
+    if vmax == 0.0 or not np.isfinite(vmax):
         vmax = 1.0
 
     im = ax.imshow(
@@ -447,7 +472,7 @@ def save_wavefield_animation(
     grid = model.grid
 
     vmax = np.percentile(np.abs(snaps), pclip)
-    if vmax == 0.0:
+    if vmax == 0.0 or not np.isfinite(vmax):
         vmax = 1.0
 
     fig, ax = plt.subplots(figsize=(9, 6))
@@ -518,6 +543,9 @@ def run_explosive_validation(
 ):
     """
     Sanity-check run with a simple isotropic stress source.
+
+    This intentionally calls the frozen NumPy reference solver directly.
+    It is not testing bilinear spreading; the main double-couple run does that.
     """
     grid = model.grid
     sampling = build_receiver_sampling(grid, receivers)
@@ -578,7 +606,7 @@ def main() -> None:
     snapshot_stride = 100
     gauge_length_m = 20.0
 
-    out_dir = Path("results/run_homogeneous_demo_free_surface")
+    out_dir = Path("results/run_homogeneous_demo_bilinear_free_surface")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Building model and geometry...")
@@ -591,17 +619,22 @@ def main() -> None:
     source, receivers = build_geometry(model, n_pml=n_boundary)
 
     print(f"Grid: {model.grid.shape}, dt = {model.grid.dt:.6e} s")
-    print(f"Source placed at X={source.x_embedded_m:.1f} m, Z={source.z_embedded_m:.1f} m")
+    print(
+        f"Source requested/embedded at "
+        f"X={source.x_embedded_m:.3f} m, Z={source.z_embedded_m:.3f} m"
+    )
     print(f"Receivers: {receivers.nrec} channels")
     print(f"half_order = {half_order}, use_ts_sfd = {use_ts_sfd}")
     print(f"free_surface = {free_surface}")
     print(f"f0 = 8.0 Hz, n_boundary = {n_boundary}, gamma_s = {gamma_s}")
     print(f"Output directory: {out_dir}")
+    print("\nSource summary:")
+    print(source.summary())
 
     # ------------------------------------------------------------------
-    # 1. Main physical run: double-couple source
+    # 1. Main production run: double-couple source with bilinear spreading
     # ------------------------------------------------------------------
-    print("\nRunning forward simulation (double-couple source)...")
+    print("\nRunning forward simulation (off-grid double-couple, bilinear spreading)...")
     run_result, das_result = run_forward_simulation(
         model=model,
         source=source,
@@ -612,10 +645,20 @@ def main() -> None:
         n_boundary=n_boundary,
         gamma_s=gamma_s,
         snapshot_stride=snapshot_stride,
-        backend="numba_fused", # "numpy" or "numba_fused"
+        backend="numba_fused",
         free_surface=free_surface,
     )
-    print("Double-couple simulation finished.")
+    print("Double-couple bilinear simulation finished.")
+
+    # Basic finite checks.
+    for name, arr in [
+        ("receiver_vx", run_result.receiver_vx),
+        ("receiver_vz", run_result.receiver_vz),
+        ("das_data", das_result.data),
+    ]:
+        if not np.all(np.isfinite(arr)):
+            raise RuntimeError(f"{name} contains NaN/Inf.")
+        print(f"{name:12s}: shape={arr.shape}, max_abs={np.max(np.abs(arr)):.6e}")
 
     print("Saving double-couple outputs...")
     plot_model_geometry(model, source, receivers, out_dir)
@@ -669,14 +712,14 @@ def main() -> None:
         source=source,
         receivers=receivers,
         run_result=run_result,
-        out_stem=out_dir / "double_couple_wavefield",
-        title_prefix="double_couple_free_surface",
+        out_stem=out_dir / "double_couple_bilinear_wavefield",
+        title_prefix="double_couple_bilinear_free_surface",
         fps=6,
         pclip=99.0,
     )
 
     np.savez_compressed(
-        out_dir / "outputs_double_couple.npz",
+        out_dir / "outputs_double_couple_bilinear.npz",
         t=run_result.t,
         receiver_vx=run_result.receiver_vx,
         receiver_vz=run_result.receiver_vz,
@@ -689,6 +732,9 @@ def main() -> None:
         receiver_s=receivers.s,
         source_x=source.x_embedded_m,
         source_z=source.z_embedded_m,
+        source_ix=source.ix,
+        source_iz=source.iz,
+        source_spreading=np.array(source.spreading),
         free_surface=free_surface,
     )
 
@@ -704,12 +750,12 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 2. Sanity-check run: simple explosive-like source
+    # 2. Secondary sanity-check run: simple explosive-like source
     # ------------------------------------------------------------------
     validation_dir = out_dir / "explosive_validation"
     validation_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\nRunning validation simulation (explosive-like source)...")
+    print("\nRunning validation simulation (explosive-like source, frozen NumPy solver)...")
     val_run_result, val_source = run_explosive_validation(
         model=model,
         receivers=receivers,
@@ -720,6 +766,14 @@ def main() -> None:
         free_surface=free_surface,
     )
     print("Explosive validation simulation finished.")
+
+    for name, arr in [
+        ("explosive_receiver_vx", val_run_result.receiver_vx),
+        ("explosive_receiver_vz", val_run_result.receiver_vz),
+    ]:
+        if not np.all(np.isfinite(arr)):
+            raise RuntimeError(f"{name} contains NaN/Inf.")
+        print(f"{name:22s}: shape={arr.shape}, max_abs={np.max(np.abs(arr)):.6e}")
 
     plot_receiver_gather(
         val_run_result.t,
