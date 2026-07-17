@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts.safod.settings import FORWARD_DIR, REAL_EVENT_PACKAGE
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -789,9 +791,7 @@ def main() -> None:
     # "catalog_event" : source from prepared real-event package
     source_mode = "catalog_event"
 
-    real_event_package = Path(
-        "results/real_event_20260401_75336802/real_das_event_window_0_15s.npz"
-    )
+    real_event_package = REAL_EVENT_PACKAGE
 
     event_cfg = None
 
@@ -799,7 +799,7 @@ def main() -> None:
         event_cfg = load_real_event_package(real_event_package)
         geom_file = event_cfg["geom_file"]
         # geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
-        out_dir = Path("results/forward_real_event_20260401_75336802_n120_g80")
+        out_dir = FORWARD_DIR
     elif source_mode == "deep_saf":
         geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
         out_dir = Path("results/safod_initial_forward")

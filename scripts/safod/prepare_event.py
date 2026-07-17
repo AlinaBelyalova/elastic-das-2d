@@ -37,33 +37,31 @@ import DASutils  # noqa: E402
 # ==============================================================================
 # USER SETTINGS
 # ==============================================================================
+from scripts.safod.settings import (
+    COMMON_FMAX_HZ,
+    COMMON_FMIN_HZ,
+    DAS_DB_PY,
+    DAS_SYSTEM_NAME,
+    EVENT,
+    FILTER_ORDER,
+    FILTER_TAPER_FRAC,
+    GEO_XLSX,
+    PREP_TMAX_S,
+    PREP_TMIN_S,
+    REAL_EVENT_DIR,
+    REAL_EVENT_PACKAGE,
+    SELECTED_FILES,
+)
+from src.signal_processing import bandpass_traces
 
-EVENT = {
-    "event_id": "NC75336802",
-    "origin_time": "2026-04-01T04:57:57.470000Z",
-}
-
-SELECTED_FILES = [
-    "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD_events/"
-    "SAFOD-Deep-10mGL-1000HzFs-2mChDualPulse_2026-04-01T045735Z.h5",
-]
-
-GEO_XLSX = "/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx"
-
-DAS_DB_PY = "/home/groups/ettore88/alina/packages/DAS-utilities/python/DAS_db.py"
-DAS_SYSTEM_NAME = "SAFOD_QuantX"
-
-OUT_DIR = Path("results/real_event_20260401_75336802")
+OUT_DIR = REAL_EVENT_DIR
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-FMIN = 1.0
-FMAX = 20.0
-
-TMIN = -2.0
-TMAX = 15.0
-
+FMIN = COMMON_FMIN_HZ
+FMAX = COMMON_FMAX_HZ
+TMIN = PREP_TMIN_S
+TMAX = PREP_TMAX_S
 PCLIP = 96.0
-
 
 # ==============================================================================
 # HEADER / METADATA HELPERS
@@ -591,28 +589,21 @@ def main() -> None:
     print(f"file start rel origin: {ot:.6f} s")
 
     # --------------------------------------------------------------------------
-    # 2. Bandpass and crop
+    # 2. Crop the temporally unfiltered event window
     # --------------------------------------------------------------------------
-    print("\nFiltering real DAS...")
-    DAS_proc = DASutils.bandpass2D_c(
-        DAS_data[:, :],
-        FMIN,
-        FMAX,
-        1.0 / fs,
-        zerophase=False,
-    ) * 1e3
-
     it0 = int(np.searchsorted(t_ax, TMIN))
     it1 = int(np.searchsorted(t_ax, TMAX))
 
-    D_event_full = DAS_proc[:, it0:it1]
+    D_event_unfiltered_full = (
+        np.asarray(DAS_data[:, it0:it1], dtype=np.float64) * 1e3
+    )
     t_event = t_ax[it0:it1]
 
-    print("\nReal event window")
-    print("-----------------")
-    print(f"time range          : {t_event[0]:.3f} to {t_event[-1]:.3f} s")
-    print(f"full data shape     : {D_event_full.shape}")
-    print(f"bandpass            : {FMIN:.1f} to {FMAX:.1f} Hz")
+    print("\nReal event window before temporal filtering")
+    print("-------------------------------------------")
+    print(f"time range      : {t_event[0]:.3f} to {t_event[-1]:.3f} s")
+    print(f"full data shape : {D_event_unfiltered_full.shape}")
+    print("temporal filter : none in saved event package")
 
     # --------------------------------------------------------------------------
     # 3. Build down-going geometry and live event projection
@@ -623,7 +614,9 @@ def main() -> None:
     # --------------------------------------------------------------------------
     # 3b. Crop real DAS to down-going borehole pass only
     # --------------------------------------------------------------------------
-    raw_channels_full = np.arange(D_event_full.shape[0], dtype=np.float64)
+    raw_channels_full = np.arange(
+        D_event_unfiltered_full.shape[0], dtype=np.float64
+    )
 
     first_borehole_channel = float(mapping["first_borehole_channel"])
     turn_channel = float(mapping["turn_channel"])
@@ -637,12 +630,23 @@ def main() -> None:
         & (raw_channels_full <= downleg_max_channel)
     )
 
-    D_event = D_event_full[downleg_mask, :]
+    D_event_unfiltered = D_event_unfiltered_full[downleg_mask, :]
     raw_channels_event = raw_channels_full[downleg_mask]
+
+    # Preview only. Quantitative comparison filters both datasets
+    # with this same zero-phase implementation.
+    D_event = bandpass_traces(
+        D_event_unfiltered,
+        fs_hz=fs,
+        fmin_hz=FMIN,
+        fmax_hz=FMAX,
+        order=FILTER_ORDER,
+        taper_frac=FILTER_TAPER_FRAC,
+    )
 
     print("\nReal DAS downleg crop")
     print("---------------------")
-    print(f"full real data shape       : {D_event_full.shape}")
+    print(f"full real data shape       : {D_event_unfiltered_full.shape}")
     print(f"first borehole channel     : {first_borehole_channel:.1f}")
     print(f"turn channel from geometry : {turn_channel:.1f}")
     print(f"downleg channel range      : {raw_channels_event[0]:.1f} to {raw_channels_event[-1]:.1f}")
@@ -678,7 +682,7 @@ def main() -> None:
     )
     ax.legend()
     fig.tight_layout()
-    fig.savefig(OUT_DIR / "real_das_event_0_15s_raw_channels.png", dpi=220, bbox_inches="tight")
+    fig.savefig(OUT_DIR / "real_das_event_preview_raw_channels.png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
     scale = np.percentile(np.abs(D_event), 99.0, axis=1, keepdims=True)
@@ -707,16 +711,17 @@ def main() -> None:
     ax.set_title(f"Real SAFOD DAS event {event_meta['event_id']} trace-normalized")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(OUT_DIR / "real_das_event_0_15s_trace_normalized.png", dpi=220, bbox_inches="tight")
+    fig.savefig(OUT_DIR / "real_das_event_preview_trace_normalized.png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
     # --------------------------------------------------------------------------
     # 5. Save real-event package
     # --------------------------------------------------------------------------
     np.savez_compressed(
-        OUT_DIR / "real_das_event_window_0_15s.npz",
+        REAL_EVENT_PACKAGE,
 
-        das_data=D_event,
+        das_data_unfiltered=D_event_unfiltered,
+        das_data_preview=D_event,
         t=t_event,
         fs=np.array(fs),
         dt=np.array(dt),
@@ -751,8 +756,11 @@ def main() -> None:
         projection_fit_rms_m=np.array(mapping["fit_rms_m"]),
 
         selected_files=np.array(SELECTED_FILES),
-        fmin=np.array(FMIN),
-        fmax=np.array(FMAX),
+        temporal_filter=np.array("none"),
+        preview_fmin_hz=np.array(FMIN),
+        preview_fmax_hz=np.array(FMAX),
+        preview_filter_order=np.array(FILTER_ORDER),
+        preview_filter_taper_frac=np.array(FILTER_TAPER_FRAC),
     )
 
     print(f"\nSaved real-event package to: {OUT_DIR.absolute()}")

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 try:
-    from scipy.signal import butter, detrend, hilbert, sosfiltfilt, windows
+    from scipy.signal import hilbert
     from scipy.spatial import cKDTree
 except ImportError as exc:
     raise ImportError(
@@ -15,49 +15,36 @@ except ImportError as exc:
         "Run it in the fwi/geo environment where SciPy is installed."
     ) from exc
 
+from scripts.safod.settings import (
+    COMMON_FMAX_HZ,
+    COMMON_FMIN_HZ,
+    COMPARISON_DIR,
+    FILTER_ORDER,
+    FILTER_TAPER_FRAC,
+    FORWARD_PACKAGE,
+    GEOMETRY_CSV,
+    REAL_EVENT_PACKAGE,
+)
+from src.signal_processing import bandpass_traces
+
 
 # ==============================================================================
 # INPUTS AND SETTINGS
 # ==============================================================================
 
-REAL_PKG = Path(
-    "results/real_event_20260401_75336802/"
-    "real_das_event_window_0_15s.npz"
-)
-
-SYN_PKG = Path(
-    "results/forward_real_event_20260401_75336802/"
-    "outputs_safod_initial_forward.npz"
-)
-
-GEOM_CSV = Path(
-    "results/real_event_20260401_75336802/"
-    "SAFOD_Phase2_projected_from_georef.csv"
-)
-
-OUT_DIR = Path(
-    "results/compare_real_synthetic_20260401_75336802"
-)
+REAL_PKG = REAL_EVENT_PACKAGE
+SYN_PKG = FORWARD_PACKAGE
+GEOM_CSV = GEOMETRY_CSV
+OUT_DIR = COMPARISON_DIR
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-
-# Synthetic Ricker STF is centred near t0 = 0.2 s.
-#
-# This shift is used only to display the synthetic waveform relative to the
-# catalogue origin. The theoretical P/S curves on the real panel are not shifted.
 SYN_DISPLAY_TIME_SHIFT_S = -0.20
 
-# Display interval relative to catalogue origin.
 TMIN = -0.30
 TMAX = 2.00
 
-# Real data in REAL_PKG were already filtered to 1–20 Hz by the event
-# preparation script. Filter the synthetic to the same nominal passband.
-FILTER_SYNTHETIC_TO_REAL_BAND = True
-FMIN_COMPARE_HZ = 1.0
-FMAX_COMPARE_HZ = 100.0
-FILTER_ORDER = 4
-FILTER_TAPER_FRAC = 0.05
+FMIN_COMPARE_HZ = COMMON_FMIN_HZ
+FMAX_COMPARE_HZ = COMMON_FMAX_HZ
 
 TRACE_NORMALIZATION_PERCENTILE = 99.0
 VMAX_SIGNED = 1.0
@@ -128,85 +115,6 @@ def trace_normalize(
     scale = np.maximum(scale, eps)
 
     return data / scale
-
-
-def bandpass_traces(
-    data: np.ndarray,
-    fs_hz: float,
-    fmin_hz: float,
-    fmax_hz: float,
-    order: int = 4,
-    taper_frac: float = 0.05,
-) -> np.ndarray:
-    """
-    Zero-phase Butterworth bandpass along the time axis.
-
-    Before filtering, each trace is linearly detrended and cosine tapered at
-    both ends. This reduces bidirectional-filter ringing and Hilbert-envelope
-    edge contamination.
-
-    Real data in REAL_PKG were already filtered to 1–20 Hz using DASutils in
-    the preparation script. This function is applied only to the synthetic
-    data to match the nominal comparison passband.
-
-    The real and synthetic filter implementations are not identical. Therefore,
-    waveform phase and ridge-delay values are QC diagnostics rather than formal
-    travel-time measurements.
-    """
-    data = np.asarray(data, dtype=np.float64)
-
-    if data.ndim != 2:
-        raise ValueError(
-            f"bandpass_traces expects a 2D array, got shape {data.shape}."
-        )
-
-    if fs_hz <= 0.0:
-        raise ValueError(f"Invalid sampling rate: {fs_hz}")
-
-    nyquist = 0.5 * fs_hz
-
-    if not 0.0 < fmin_hz < fmax_hz < nyquist:
-        raise ValueError(
-            "Invalid bandpass frequencies: "
-            f"fmin={fmin_hz}, fmax={fmax_hz}, Nyquist={nyquist}"
-        )
-
-    if not 0.0 <= taper_frac < 0.5:
-        raise ValueError(
-            f"taper_frac must be in [0, 0.5), got {taper_frac}"
-        )
-
-    filtered_input = detrend(
-        data,
-        axis=1,
-        type="linear",
-    )
-
-    nt = filtered_input.shape[1]
-    n_taper = int(taper_frac * nt)
-
-    if n_taper >= 1:
-        taper = np.ones(nt, dtype=np.float64)
-        ramp = windows.hann(2 * n_taper)
-
-        taper[:n_taper] = ramp[:n_taper]
-        taper[-n_taper:] = ramp[n_taper:]
-
-        filtered_input = filtered_input * taper[None, :]
-
-    sos = butter(
-        order,
-        [fmin_hz, fmax_hz],
-        btype="bandpass",
-        fs=fs_hz,
-        output="sos",
-    )
-
-    return sosfiltfilt(
-        sos,
-        filtered_input,
-        axis=1,
-    )
 
 
 def compute_envelope(data: np.ndarray) -> np.ndarray:
@@ -1289,151 +1197,118 @@ def main() -> None:
     )
 
     # --------------------------------------------------------------------------
-    # Real DAS
+    # Real DAS: load unfiltered data and apply the common zero-phase filter
     # --------------------------------------------------------------------------
-    real_data_full = np.asarray(
-        real["das_data"],
-        dtype=np.float64,
-    )
+    if "das_data_unfiltered" not in real.files:
+        raise RuntimeError(
+            "Real-event package is from the old preprocessing workflow. "
+            "Rerun: python -m scripts.safod.prepare_event"
+        )
 
-    real_time_full = np.asarray(
-        real["t"],
-        dtype=np.float64,
+    real_data_unfiltered_full = np.asarray(
+        real["das_data_unfiltered"], dtype=np.float64
     )
+    real_time_full = np.asarray(real["t"], dtype=np.float64)
+    real_channels = np.asarray(real["raw_channels"], dtype=np.float64)
+    real_fs = float(get_scalar(real, "fs"))
 
-    real_channels = np.asarray(
-        real["raw_channels"],
-        dtype=np.float64,
-    )
-
-    if real_data_full.shape != (
+    if real_data_unfiltered_full.shape != (
         real_channels.size,
         real_time_full.size,
     ):
         raise ValueError(
             "Real DAS shape does not match channel/time axes: "
-            f"{real_data_full.shape} != "
+            f"{real_data_unfiltered_full.shape} != "
             f"({real_channels.size}, {real_time_full.size})."
         )
+
+    print(
+        "Filtering real DAS to "
+        f"{FMIN_COMPARE_HZ:.1f}–{FMAX_COMPARE_HZ:.1f} Hz, zero phase..."
+    )
+    real_data_filtered_full = bandpass_traces(
+        real_data_unfiltered_full,
+        fs_hz=real_fs,
+        fmin_hz=FMIN_COMPARE_HZ,
+        fmax_hz=FMAX_COMPARE_HZ,
+        order=FILTER_ORDER,
+        taper_frac=FILTER_TAPER_FRAC,
+    )
 
     real_time_mask = (
         (real_time_full >= TMIN)
         & (real_time_full <= TMAX)
     )
-
     if np.count_nonzero(real_time_mask) < 2:
         raise RuntimeError(
-            "Requested real-data display interval contains fewer than two samples."
+            "Requested real-data display interval contains fewer than "
+            "two samples."
         )
 
-    # Compute the Hilbert envelope on the complete saved real-event window.
-    real_envelope_full = compute_envelope(
-        real_data_full
-    )
-
-    real_data = real_data_full[
-        :,
-        real_time_mask,
-    ]
-
-    real_time = real_time_full[
-        real_time_mask
-    ]
-
-    real_envelope = real_envelope_full[
-        :,
-        real_time_mask,
-    ]
-
-    real_signed_normalized = trace_normalize(
-        real_data
-    )
-
-    real_envelope_normalized = trace_normalize(
-        real_envelope
-    )
+    real_envelope_full = compute_envelope(real_data_filtered_full)
+    real_data = real_data_filtered_full[:, real_time_mask]
+    real_time = real_time_full[real_time_mask]
+    real_envelope = real_envelope_full[:, real_time_mask]
+    real_signed_normalized = trace_normalize(real_data)
+    real_envelope_normalized = trace_normalize(real_envelope)
 
     # --------------------------------------------------------------------------
-    # Synthetic DAS
+    # Synthetic DAS: apply exactly the same common zero-phase filter
     # --------------------------------------------------------------------------
-    synthetic_data_full = np.asarray(
-        synthetic["das_data"],
-        dtype=np.float64,
+    synthetic_data_unfiltered_full = np.asarray(
+        synthetic["das_data"], dtype=np.float64
     )
+    synthetic_time_full = np.asarray(synthetic["t"], dtype=np.float64)
 
-    synthetic_time_full = np.asarray(
-        synthetic["t"],
-        dtype=np.float64,
-    )
-
-    if synthetic_data_full.shape[1] != synthetic_time_full.size:
+    if synthetic_data_unfiltered_full.shape[1] != synthetic_time_full.size:
         raise ValueError(
             "Synthetic DAS time dimension does not match its time axis: "
-            f"{synthetic_data_full.shape[1]} != {synthetic_time_full.size}."
+            f"{synthetic_data_unfiltered_full.shape[1]} != "
+            f"{synthetic_time_full.size}."
         )
 
     synthetic_dt = float(
         get_scalar(
             synthetic,
             "dt",
-            np.median(
-                np.diff(synthetic_time_full)
-            ),
+            np.median(np.diff(synthetic_time_full)),
         )
     )
-
     if synthetic_dt <= 0.0:
-        raise ValueError(
-            f"Invalid synthetic dt: {synthetic_dt}"
-        )
-
+        raise ValueError(f"Invalid synthetic dt: {synthetic_dt}")
     synthetic_fs = 1.0 / synthetic_dt
 
-    if FILTER_SYNTHETIC_TO_REAL_BAND:
-        print(
-            "Filtering synthetic DAS to "
-            f"{FMIN_COMPARE_HZ:.1f}–{FMAX_COMPARE_HZ:.1f} Hz..."
-        )
+    print(
+        "Filtering synthetic DAS to "
+        f"{FMIN_COMPARE_HZ:.1f}–{FMAX_COMPARE_HZ:.1f} Hz, zero phase..."
+    )
+    synthetic_data_filtered_full = bandpass_traces(
+        synthetic_data_unfiltered_full,
+        fs_hz=synthetic_fs,
+        fmin_hz=FMIN_COMPARE_HZ,
+        fmax_hz=FMAX_COMPARE_HZ,
+        order=FILTER_ORDER,
+        taper_frac=FILTER_TAPER_FRAC,
+    )
 
-        synthetic_data_full = bandpass_traces(
-            synthetic_data_full,
-            fs_hz=synthetic_fs,
-            fmin_hz=FMIN_COMPARE_HZ,
-            fmax_hz=FMAX_COMPARE_HZ,
-            order=FILTER_ORDER,
-            taper_frac=FILTER_TAPER_FRAC,
-        )
-
-    # Compute Hilbert envelope before short display-window cropping.
     synthetic_envelope_full = compute_envelope(
-        synthetic_data_full
+        synthetic_data_filtered_full
     )
-
     synthetic_time_shifted_full = (
-        synthetic_time_full
-        + SYN_DISPLAY_TIME_SHIFT_S
+        synthetic_time_full + SYN_DISPLAY_TIME_SHIFT_S
     )
-
     synthetic_time_mask = (
         (synthetic_time_shifted_full >= TMIN)
         & (synthetic_time_shifted_full <= TMAX)
     )
-
     if np.count_nonzero(synthetic_time_mask) < 2:
         raise RuntimeError(
-            "Requested synthetic display interval contains fewer than two samples."
+            "Requested synthetic display interval contains fewer than "
+            "two samples."
         )
 
-    synthetic_data = synthetic_data_full[
-        :,
-        synthetic_time_mask,
-    ]
-
-    synthetic_envelope = synthetic_envelope_full[
-        :,
-        synthetic_time_mask,
-    ]
-
+    synthetic_data = synthetic_data_filtered_full[:, synthetic_time_mask]
+    synthetic_envelope = synthetic_envelope_full[:, synthetic_time_mask]
     synthetic_time_shifted = synthetic_time_shifted_full[
         synthetic_time_mask
     ]
