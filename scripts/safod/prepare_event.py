@@ -134,17 +134,17 @@ def fetch_event_from_ncedc() -> dict:
     client = Client("NCEDC")
 
     event_id_raw = str(EVENT["event_id"])
-    event_id_no_prefix = event_id_raw.replace("NC", "")
+    ncedc_event_id = int(EVENT["ncedc_event_id"])
 
     cat = None
 
-    for eid in [event_id_raw, event_id_no_prefix]:
-        try:
-            cat = client.get_events(eventid=eid)
-            if len(cat) > 0:
-                break
-        except Exception as e:
-            print(f"NCEDC eventid lookup failed for {eid!r}: {e}")
+    try:
+        cat = client.get_events(eventid=ncedc_event_id)
+    except Exception as exc:
+        print(
+            "NCEDC eventid lookup failed for "
+            f"{ncedc_event_id!r}: {exc}"
+        )
 
     if cat is None or len(cat) == 0:
         t0 = UTCDateTime(EVENT["origin_time"])
