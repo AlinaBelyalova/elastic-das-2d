@@ -1,5 +1,5 @@
 # ==============================================================================
-# scripts/run_safod_initial_forward.py
+# scripts/safod/run_forward.py
 #
 # SAFOD initial-model forward simulation.
 #
@@ -53,7 +53,7 @@ def load_real_event_package(path: Path) -> dict:
     """
     Load prepared real-event metadata for synthetic modelling.
 
-    The package is created by scripts/prepare_real_event_*.py and contains:
+    The package is created by scripts.safod.prepare_event and contains:
         - event_x_model_m
         - event_z_model_m
         - gauge_length_m
@@ -799,7 +799,7 @@ def main() -> None:
         event_cfg = load_real_event_package(real_event_package)
         geom_file = event_cfg["geom_file"]
         # geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
-        out_dir = Path("results/forward_real_event_20260401_75336802")
+        out_dir = Path("results/forward_real_event_20260401_75336802_n120_g80")
     elif source_mode == "deep_saf":
         geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
         out_dir = Path("results/safod_initial_forward")
@@ -816,12 +816,38 @@ def main() -> None:
 
     # The exact duration is printed after grid construction because dt is
     # selected from the CFL condition.
-    nt = 12000
 
+    nt = 12000
     half_order = 2
-    n_boundary = 40
+
+    # Boundary configuration selected by the controlled homogeneous sweep.
+    n_boundary = 120
     gamma_s = 80.0
     free_surface = True
+
+    # Preserve the physical entrance of the absorbing boundary used by the
+    # original n40 model. Increasing n_boundary must enlarge the grid outward,
+    # not move the sponge into the scientific model domain.
+    baseline_n_boundary = 40
+    baseline_x_padding_m = 800.0
+    baseline_z_max_m = 9000.0
+
+    x_padding_m = (
+        baseline_x_padding_m
+        + (n_boundary - baseline_n_boundary) * dx
+    )
+    z_max_m = (
+        baseline_z_max_m
+        + (n_boundary - baseline_n_boundary) * dz
+    )
+
+    print("\nAbsorbing-boundary configuration")
+    print("--------------------------------")
+    print(f"n_boundary          : {n_boundary}")
+    print(f"gamma_s             : {gamma_s:.1f}")
+    print(f"sponge width        : {n_boundary * dx:.1f} m")
+    print(f"x padding           : {x_padding_m:.1f} m")
+    print(f"model bottom        : {z_max_m:.1f} m")
 
     if source_mode == "catalog_event":
         gauge_length_m = event_cfg["gauge_length_m"]
@@ -855,12 +881,9 @@ def main() -> None:
 
     grid, model, x_cable_raw, z_cable_raw, metadata = build_safod_model(
         geom_file=geom_file,
-
         x_column=x_column,
         z_column=z_column,
-
         build_initial_model=True,
-
         dx=dx,
         dz=dz,
         dt=None,
@@ -868,19 +891,19 @@ def main() -> None:
         half_order=half_order,
         cfl_safety=0.80,
 
-        z_max_m=9000.0,
+        # Enlarged outward so that the wider sponge does not consume the
+        # original physical model interior.
+        x_padding_m=x_padding_m,
+        z_max_m=z_max_m,
         z_padding_bottom_m=2500.0,
 
         z_tie_m=None,
         anchor_fault_to_cable_end=True,
         fault_offset_from_cable_m=105.0,
-
         fault_dip_deg=82.0,
         fault_dip_sign=-1.0,
-
         left_block_name="salinian",
         right_block_name="franciscan",
-
         initial_cross_fault_contrast=-0.08,
         initial_cross_fault_transition_m=350.0,
         initial_fault_zone_width_m=160.0,
