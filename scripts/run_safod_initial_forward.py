@@ -5,10 +5,11 @@
 #
 # This script is a QC forward run, not FWI yet.
 #
-# Current mode:
-#   deep_saf source:
-#       synthetic local-earthquake-like source below the DAS cable,
-#       near the SAF prior line, inside an extended model domain.
+# Current default mode:
+#   catalog_event:
+#       projected source and corrected down-going SAFOD DAS geometry for
+#       NC75336802. The alternative deep_saf mode remains available for
+#       controlled synthetic QC.
 #
 # Requirements:
 #   - src.safod_builder.build_safod_model
@@ -32,6 +33,7 @@ from src.receivers import build_das_cable
 from src.simulator import run_forward_simulation
 from src.plotting import plot_safod_model, place_safod_legend
 from matplotlib.animation import FuncAnimation, PillowWriter
+from scipy.interpolate import RegularGridInterpolator
 
 
 # ==============================================================================
@@ -46,6 +48,235 @@ def normalize_traces(data: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     scale = np.max(np.abs(data), axis=1, keepdims=True)
     scale = np.maximum(scale, eps)
     return data / scale
+
+def load_real_event_package(path: Path) -> dict:
+    """
+    Load prepared real-event metadata for synthetic modelling.
+
+    The package is created by scripts/prepare_real_event_*.py and contains:
+        - event_x_model_m
+        - event_z_model_m
+        - gauge_length_m
+        - channel_spacing_m
+        - geometry_csv or fallback geometry path
+        - event metadata
+    """
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"Real-event package not found: {path}")
+
+    pkg = np.load(path, allow_pickle=True)
+
+    def get_scalar(name: str, default=None):
+        if name not in pkg.files:
+            if default is None:
+                raise KeyError(f"Missing {name!r} in real-event package: {path}")
+            return default
+
+        val = pkg[name]
+
+        if val.shape == ():
+            return val.item()
+
+        if val.size == 1:
+            return val.reshape(-1)[0].item()
+
+        return val
+
+    event_dir = path.parent
+
+    if "geometry_csv" in pkg.files:
+        geom_file = str(get_scalar("geometry_csv"))
+    else:
+        geom_file = str(event_dir / "SAFOD_Phase2_projected_from_georef.csv")
+
+    cfg = {
+        "package_path": str(path),
+        "event_dir": str(event_dir),
+        "geom_file": geom_file,
+
+        "event_id": str(get_scalar("ev_id", "unknown")),
+        "origin_time": str(get_scalar("ev_origin_time", "unknown")),
+        "magnitude": float(get_scalar("ev_mag", np.nan)),
+        "depth_km": float(get_scalar("ev_depth_km", np.nan)),
+
+        "x_src": float(get_scalar("event_x_model_m")),
+        "z_src": float(get_scalar("event_z_model_m")),
+        "event_along_profile_m": float(get_scalar("event_along_profile_m", np.nan)),
+        "event_crossline_m": float(get_scalar("event_crossline_m", np.nan)),
+
+        "gauge_length_m": float(get_scalar("gauge_length_m")),
+        "real_channel_spacing_m": float(get_scalar("channel_spacing_m")),
+    }
+
+    print("\nLoaded real-event package")
+    print("-------------------------")
+    print(f"package          : {cfg['package_path']}")
+    print(f"event id         : {cfg['event_id']}")
+    print(f"origin           : {cfg['origin_time']}")
+    print(f"magnitude        : {cfg['magnitude']:.2f}")
+    print(f"depth            : {cfg['depth_km']:.2f} km")
+    print(f"source x,z       : {cfg['x_src']:.3f}, {cfg['z_src']:.3f} m")
+    print(f"crossline        : {cfg['event_crossline_m']:.3f} m")
+    print(f"gauge length     : {cfg['gauge_length_m']:.6f} m")
+    print(f"real dCh         : {cfg['real_channel_spacing_m']:.6f} m")
+    print(f"geometry csv     : {cfg['geom_file']}")
+
+    return cfg
+
+def compute_straight_ray_arrivals(
+    *,
+    grid,
+    model,
+    receivers,
+    x_src: float,
+    z_src: float,
+    n_samples_per_ray: int = 256,
+    time_shift_s: float = 0.0,
+) -> dict:
+    """
+    Approximate P/S arrivals by integrating slowness along straight rays.
+
+    This is a model-based straight-ray QC calculation, not full ray tracing.
+    The velocity fields are sampled for all source-receiver rays in one
+    vectorized RegularGridInterpolator call.
+
+    Parameters
+    ----------
+    time_shift_s
+        Optional constant added to the travel times. Use 0.0 for physical
+        travel-time / first-arrival overlays.
+    """
+    if n_samples_per_ray < 2:
+        raise ValueError("n_samples_per_ray must be >= 2.")
+
+    rx = np.asarray(receivers.x, dtype=np.float64)
+    rz = np.asarray(receivers.z, dtype=np.float64)
+    s = np.asarray(receivers.s, dtype=np.float64)
+
+    if rx.ndim != 1 or rz.ndim != 1 or s.ndim != 1:
+        raise ValueError("receivers.x, receivers.z, and receivers.s must be 1D.")
+
+    if not (rx.size == rz.size == s.size == int(receivers.nrec)):
+        raise ValueError(
+            "Receiver coordinate lengths do not match receivers.nrec: "
+            f"x={rx.size}, z={rz.size}, s={s.size}, nrec={receivers.nrec}."
+        )
+
+    vp = np.asarray(model.vp, dtype=np.float64)
+    vs = np.asarray(model.vs, dtype=np.float64)
+    expected_shape = (int(grid.nx), int(grid.nz))
+
+    if vp.shape != expected_shape or vs.shape != expected_shape:
+        raise ValueError(
+            "Vp/Vs shape must match (grid.nx, grid.nz): "
+            f"Vp={vp.shape}, Vs={vs.shape}, expected={expected_shape}."
+        )
+
+    if not np.all(np.isfinite(vp)) or not np.all(np.isfinite(vs)):
+        raise ValueError("Vp/Vs contain NaN or Inf.")
+
+    if np.any(vp <= 0.0) or np.any(vs <= 0.0):
+        raise ValueError("Vp/Vs must be strictly positive.")
+
+    interp_vp = RegularGridInterpolator(
+        (np.asarray(grid.x, dtype=np.float64),
+         np.asarray(grid.z, dtype=np.float64)),
+        vp,
+        method="linear",
+        bounds_error=True,
+    )
+    interp_vs = RegularGridInterpolator(
+        (np.asarray(grid.x, dtype=np.float64),
+         np.asarray(grid.z, dtype=np.float64)),
+        vs,
+        method="linear",
+        bounds_error=True,
+    )
+
+    dx_ray = rx - float(x_src)
+    dz_ray = rz - float(z_src)
+    length = np.hypot(dx_ray, dz_ray)
+
+    q = np.linspace(0.0, 1.0, n_samples_per_ray, dtype=np.float64)
+
+    # Shape: (n_receivers, n_samples_per_ray)
+    x_lines = float(x_src) + np.outer(dx_ray, q)
+    z_lines = float(z_src) + np.outer(dz_ray, q)
+
+    points = np.column_stack(
+        (x_lines.ravel(), z_lines.ravel())
+    )
+
+    vp_lines = interp_vp(points).reshape(rx.size, n_samples_per_ray)
+    vs_lines = interp_vs(points).reshape(rx.size, n_samples_per_ray)
+
+    if (
+        not np.all(np.isfinite(vp_lines))
+        or not np.all(np.isfinite(vs_lines))
+        or np.any(vp_lines <= 0.0)
+        or np.any(vs_lines <= 0.0)
+    ):
+        raise ValueError(
+            "Interpolated Vp/Vs along one or more straight rays are invalid."
+        )
+
+    t_p = (
+        length
+        * np.trapezoid(1.0 / vp_lines, q, axis=1)
+        + float(time_shift_s)
+    )
+    t_s = (
+        length
+        * np.trapezoid(1.0 / vs_lines, q, axis=1)
+        + float(time_shift_s)
+    )
+
+    zero_length = length == 0.0
+    t_p[zero_length] = float(time_shift_s)
+    t_s[zero_length] = float(time_shift_s)
+
+    return {
+        "s": s,
+        "P": t_p,
+        "S": t_s,
+        "time_shift_s": float(time_shift_s),
+        "method": "straight_ray_slowness_integral_vectorized",
+    }
+
+
+def subset_arrivals(arrivals: dict, channel_indices: np.ndarray) -> dict:
+    """
+    Subset receiver arrival curves to DAS gauge-centre channels.
+    """
+    idx = np.asarray(channel_indices, dtype=np.int64)
+    return {
+        "s": np.asarray(arrivals["s"])[idx],
+        "P": np.asarray(arrivals["P"])[idx],
+        "S": np.asarray(arrivals["S"])[idx],
+        "time_shift_s": float(arrivals.get("time_shift_s", 0.0)),
+        "method": arrivals.get("method", "unknown"),
+    }
+
+
+def _add_arrival_overlays(ax, arrival_times: dict | None) -> None:
+    """
+    Add approximate P/S arrival curves to a gather plot.
+
+    x-axis: time [s]
+    y-axis: cable arc length [m]
+    """
+    if arrival_times is None:
+        return
+
+    s = np.asarray(arrival_times["s"], dtype=np.float64)
+    t_p = np.asarray(arrival_times["P"], dtype=np.float64)
+    t_s = np.asarray(arrival_times["S"], dtype=np.float64)
+
+    ax.plot(t_p, s, color="black", lw=1.4, ls="--", label="Approx. P")
+    ax.plot(t_s, s, color="black", lw=1.4, ls=":", label="Approx. S")
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.85)
 
 
 def trim_cable_for_solver_domain(
@@ -155,49 +386,49 @@ def check_source_inside_solver_domain(
 def check_record_duration(
     *,
     grid,
-    model,
-    receivers,
-    x_src: float,
-    z_src: float,
+    max_s_arrival_s: float,
     min_tail_after_s_s: float = 0.50,
 ) -> None:
     """
-    Approximate timing QC.
+    Record-length QC based on the maximum model-based straight-ray S arrival.
 
-    Uses straight-line distance and median Vp/Vs only. This is not ray tracing,
-    but catches obviously too-short simulations before the run.
+    The arrival remains an approximation because the paths are constrained to
+    be straight. It is nevertheless more consistent than using one global
+    percentile velocity unrelated to the actual source-receiver paths.
     """
-    rx = np.asarray(receivers.x, dtype=np.float64)
-    rz = np.asarray(receivers.z, dtype=np.float64)
+    max_s_arrival_s = float(max_s_arrival_s)
+    min_tail_after_s_s = float(min_tail_after_s_s)
 
-    dist = np.sqrt((rx - x_src) ** 2 + (rz - z_src) ** 2)
-    dmax = float(np.max(dist))
+    if not np.isfinite(max_s_arrival_s) or max_s_arrival_s < 0.0:
+        raise ValueError(
+            f"max_s_arrival_s must be finite and non-negative; "
+            f"got {max_s_arrival_s}."
+        )
 
-    vp_ref = float(np.percentile(model.vp, 50.0))
-    vs_ref = float(np.percentile(model.vs, 50.0))
-
-    t_p_far = dmax / vp_ref
-    t_s_far = dmax / vs_ref
+    if min_tail_after_s_s < 0.0:
+        raise ValueError(
+            f"min_tail_after_s_s must be non-negative; "
+            f"got {min_tail_after_s_s}."
+        )
 
     duration = float((grid.nt - 1) * grid.dt)
-    tail_after_s = duration - t_s_far
+    tail_after_s = duration - max_s_arrival_s
 
     print("\nRecord-duration QC")
     print("------------------")
-    print(f"duration                    : {duration:.3f} s")
-    print(f"max source-receiver distance: {dmax:.1f} m")
-    print(f"median Vp / Vs              : {vp_ref:.1f} / {vs_ref:.1f} m/s")
-    print(f"estimated far P             : {t_p_far:.3f} s")
-    print(f"estimated far S             : {t_s_far:.3f} s")
-    print(f"tail after far S            : {tail_after_s:.3f} s")
+    print(f"duration                           : {duration:.3f} s")
+    print(f"max straight-ray S arrival (approx): {max_s_arrival_s:.3f} s")
+    print(f"tail after far S                   : {tail_after_s:.3f} s")
 
     if tail_after_s < min_tail_after_s_s:
-        required_duration = t_s_far + min_tail_after_s_s
+        required_duration = max_s_arrival_s + min_tail_after_s_s
         suggested_nt = int(np.ceil(required_duration / grid.dt)) + 1
 
         raise ValueError(
-            "Record is probably too short for useful QC after far S arrivals. "
-            f"tail_after_s={tail_after_s:.3f} s, required >= {min_tail_after_s_s:.3f} s. "
+            "Record is probably too short for useful QC after the latest "
+            "straight-ray S arrival. "
+            f"tail_after_s={tail_after_s:.3f} s, "
+            f"required >= {min_tail_after_s_s:.3f} s. "
             f"Increase nt from {grid.nt} to about {suggested_nt}."
         )
 
@@ -213,6 +444,7 @@ def plot_receiver_gather(
     cbar_label: str,
     out_path: Path,
     normalized: bool = False,
+    arrival_times=None,
 ) -> None:
     data = np.asarray(data, dtype=np.float64)
     arr = normalize_traces(data) if normalized else data
@@ -245,6 +477,9 @@ def plot_receiver_gather(
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Arc length along DAS cable [m]")
     ax.set_title(title)
+
+    _add_arrival_overlays(ax, arrival_times)
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -258,6 +493,7 @@ def plot_das_gather(
     title: str,
     out_path: Path,
     normalized: bool = False,
+    arrival_times=None,
 ) -> None:
     data = np.asarray(das_result.data, dtype=np.float64)
     arr = normalize_traces(data) if normalized else data
@@ -293,6 +529,9 @@ def plot_das_gather(
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Arc length along DAS cable [m]")
     ax.set_title(title)
+
+    _add_arrival_overlays(ax, arrival_times)
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -543,43 +782,82 @@ def make_wavefield_gif(
 # ==============================================================================
 
 def main() -> None:
-    geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
+    # --------------------------------------------------------------------------
+    # Run mode
+    # --------------------------------------------------------------------------
+    # "deep_saf"       : old synthetic deep source near the SAF prior
+    # "catalog_event" : source from prepared real-event package
+    source_mode = "catalog_event"
 
-    out_dir = Path("results/safod_initial_forward")
+    real_event_package = Path(
+        "results/real_event_20260401_75336802/real_das_event_window_0_15s.npz"
+    )
+
+    event_cfg = None
+
+    if source_mode == "catalog_event":
+        event_cfg = load_real_event_package(real_event_package)
+        geom_file = event_cfg["geom_file"]
+        # geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
+        out_dir = Path("results/forward_real_event_20260401_75336802")
+    elif source_mode == "deep_saf":
+        geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
+        out_dir = Path("results/safod_initial_forward")
+    else:
+        raise ValueError(f"Unknown source_mode: {source_mode!r}")
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------------------------------
-    # Numerical settings for deep-source QC
+    # Numerical settings
     # --------------------------------------------------------------------------
-    # Use 10 m for the first deep-source run. This keeps the model affordable.
-    # Once the wavefield looks physically reasonable, repeat with dx=5 m.
-    dx = 10.0
-    dz = 10.0
+    dx = 5.0
+    dz = 5.0
 
-    # With dt ~4.8e-4 s, nt=8500 gives about 4.1 s.
-    nt = 8500
+    # The exact duration is printed after grid construction because dt is
+    # selected from the CFL condition.
+    nt = 12000
 
     half_order = 2
     n_boundary = 40
     gamma_s = 80.0
     free_surface = True
 
-    # Realistic-ish Nano/Sintela gauge length. This does not need to be
-    # a multiple of channel spacing after the src.das continuous-GL fix.
-    gauge_length_m = 16.6213
-    channel_spacing_m = 10.0
+    if source_mode == "catalog_event":
+        gauge_length_m = event_cfg["gauge_length_m"]
+
+        # First QC run: keep receivers on 5 m spacing for speed.
+        # Later we can repeat with real channel spacing 2.041905 m and dx=2 m.
+        channel_spacing_m = 5.0
+
+        event_id_for_title = event_cfg["event_id"]
+    else:
+        gauge_length_m = 10.209524
+        channel_spacing_m = 5.0
+        event_id_for_title = "deep_saf"
 
     # --------------------------------------------------------------------------
     # 1. Build extended SAFOD initial model
     # --------------------------------------------------------------------------
+
+    if source_mode == "catalog_event":
+        # New real-event geometry file:
+        #   X_2D_m = along-profile x
+        #   Z_2D_m = TVD depth
+        x_column = "X_2D_m"
+        z_column = "Z_2D_m"
+    else:
+        # Old projected geometry file:
+        #   model x <- Z_2D_m
+        #   model z <- X_2D_m
+        x_column = "Z_2D_m"
+        z_column = "X_2D_m"
+
     grid, model, x_cable_raw, z_cable_raw, metadata = build_safod_model(
         geom_file=geom_file,
 
-        # Axis fix:
-        # model x <- CSV Z_2D_m
-        # model z <- CSV X_2D_m
-        x_column="Z_2D_m",
-        z_column="X_2D_m",
+        x_column=x_column,
+        z_column=z_column,
 
         build_initial_model=True,
 
@@ -590,10 +868,8 @@ def main() -> None:
         half_order=half_order,
         cfl_safety=0.80,
 
-        # Important for deep source:
-        # extend the model well below the DAS cable.
-        z_max_m=6500.0,
-        z_padding_bottom_m=900.0,
+        z_max_m=9000.0,
+        z_padding_bottom_m=2500.0,
 
         z_tie_m=None,
         anchor_fault_to_cable_end=True,
@@ -657,32 +933,73 @@ def main() -> None:
     print(f"receiver z : {receivers.z.min():.1f} to {receivers.z.max():.1f} m")
 
     # --------------------------------------------------------------------------
-    # 3. Deep local-earthquake-like source near SAF
+    # 3. Source
     # --------------------------------------------------------------------------
-    z_src_target_m = 5200.0
+    if source_mode == "catalog_event":
+        # Prepared real earthquake source projected into the 2D model.
+        #
+        # For NC75336802:
+        #   origin    = 2026-04-01T04:57:57.470000Z
+        #   M         = 0.77 Md
+        #   depth     = 1.57 km
+        #   x_model   = 1687.279 m
+        #   crossline = 116.379 m
+        #
+        # This is a good 2D-compatible event geometrically, but small magnitude.
+        x_src = float(event_cfg["x_src"])
+        z_src = float(event_cfg["z_src"])
 
-    z_src = float(
-        np.clip(
-            z_src_target_m,
-            grid.z[0] + (n_boundary + half_order + 10) * grid.dz,
-            grid.z[-1] - (n_boundary + half_order + 10) * grid.dz,
+        source_theta_deg = 35.0
+        source_scalar_moment = 1.0e12
+        source_f0_hz = 10.0
+
+        print("\nCatalog-event source")
+        print("--------------------")
+        print(f"event id      : {event_cfg['event_id']}")
+        print(f"origin        : {event_cfg['origin_time']}")
+        print(f"magnitude     : {event_cfg['magnitude']:.2f}")
+        print(f"crossline     : {event_cfg['event_crossline_m']:.1f} m")
+        print(f"x_src, z_src  : {x_src:.3f}, {z_src:.3f} m")
+        print(f"theta         : {source_theta_deg:.1f} deg")
+        print(f"f0            : {source_f0_hz:.2f} Hz")
+
+    elif source_mode == "deep_saf":
+        # Old synthetic source near the SAF prior.
+        z_src_target_m = 5200.0
+
+        z_src = float(
+            np.clip(
+                z_src_target_m,
+                grid.z[0] + (n_boundary + half_order + 10) * grid.dz,
+                grid.z[-1] - (n_boundary + half_order + 10) * grid.dz,
+            )
         )
-    )
 
-    x_fault_src = float(
-        fault_x_at_z(
-            z_src,
-            x_tie_m=metadata.x_tie_m,
-            z_tie_m=metadata.z_tie_m,
-            fault_dip_deg=metadata.fault_dip_deg,
-            fault_dip_sign=metadata.fault_dip_sign,
+        x_fault_src = float(
+            fault_x_at_z(
+                z_src,
+                x_tie_m=metadata.x_tie_m,
+                z_tie_m=metadata.z_tie_m,
+                fault_dip_deg=metadata.fault_dip_deg,
+                fault_dip_sign=metadata.fault_dip_sign,
+            )
         )
-    )
 
-    # Put source near the SAF, slightly on the cable side.
-    # Fractions make it deliberately off-grid for bilinear spreading.
-    x_src = float(x_fault_src - 80.0 + 0.37 * grid.dx)
-    z_src = float(z_src + 0.61 * grid.dz)
+        x_src = float(x_fault_src - 80.0 + 0.37 * grid.dx)
+        z_src = float(z_src + 0.61 * grid.dz)
+
+        source_theta_deg = 35.0
+        source_scalar_moment = 1.0e12
+        source_f0_hz = 6.0
+
+        print("\nDeep SAF synthetic source")
+        print("-------------------------")
+        print(f"x_src, z_src  : {x_src:.3f}, {z_src:.3f} m")
+        print(f"theta         : {source_theta_deg:.1f} deg")
+        print(f"f0            : {source_f0_hz:.2f} Hz")
+
+    else:
+        raise ValueError(f"Unknown source_mode: {source_mode!r}")
 
     check_source_inside_solver_domain(
         grid=grid,
@@ -692,16 +1009,15 @@ def main() -> None:
         half_order=half_order,
     )
 
-    # Longer path -> slightly lower dominant frequency than near-cable QC.
     source = build_dc_source(
         grid=grid,
         x_m=x_src,
         z_m=z_src,
-        theta_deg=35.0,
-        scalar_moment=1.0e12,
+        theta_deg=source_theta_deg,
+        scalar_moment=source_scalar_moment,
         nt=grid.nt,
         dt=grid.dt,
-        f0_hz=6.0,
+        f0_hz=source_f0_hz,
         derivative_order=0,
         spreading="bilinear",
     )
@@ -711,15 +1027,39 @@ def main() -> None:
     print(source.summary())
 
     # --------------------------------------------------------------------------
-    # 4. Timing pre-check
+    # 4. Straight-ray arrival QC and record-duration pre-check
     # --------------------------------------------------------------------------
-    check_record_duration(
+    # Always compute physical travel times with zero source-time shift.
+    # These arrays are reused later for the gather overlays and saved output.
+    arrivals_receiver = compute_straight_ray_arrivals(
         grid=grid,
         model=model,
         receivers=receivers,
         x_src=source.x_embedded_m,
         z_src=source.z_embedded_m,
+        n_samples_per_ray=256,
+        time_shift_s=0.0,
+    )
+
+    max_s_arrival_s = float(np.max(arrivals_receiver["S"]))
+
+    check_record_duration(
+        grid=grid,
+        max_s_arrival_s=max_s_arrival_s,
         min_tail_after_s_s=0.50,
+    )
+
+    print("\nApproximate P/S arrival overlays")
+    print("--------------------------------")
+    print(f"method      : {arrivals_receiver['method']}")
+    print(f"time shift  : {arrivals_receiver['time_shift_s']:.3f} s")
+    print(
+        f"P range     : {arrivals_receiver['P'].min():.3f} to "
+        f"{arrivals_receiver['P'].max():.3f} s"
+    )
+    print(
+        f"S range     : {arrivals_receiver['S'].min():.3f} to "
+        f"{arrivals_receiver['S'].max():.3f} s"
     )
 
     # --------------------------------------------------------------------------
@@ -788,7 +1128,7 @@ def main() -> None:
             metadata=metadata,
             source=source,
             out_path=out_dir / "05_wavefield_vz_moment_tensor.gif",
-            title="SAFOD Vz wavefield propagation: double-couple moment tensor",
+            title=f"SAFOD Vz wavefield: {event_id_for_title}, double-couple source",
             fps=6,
             max_frames=80,
             percentile_clip=99.5,
@@ -822,6 +1162,16 @@ def main() -> None:
     print(f"nchan_out      : {das_result.nchan_out}")
 
     # --------------------------------------------------------------------------
+    # 7b. DAS-channel subset of the precomputed first-arrival curves
+    # --------------------------------------------------------------------------
+    source_time_shift_s = float(arrivals_receiver["time_shift_s"])
+
+    arrivals_das = subset_arrivals(
+        arrivals_receiver,
+        das_result.channel_indices,
+    )
+
+    # --------------------------------------------------------------------------
     # 8. Save figures
     # --------------------------------------------------------------------------
     plot_receiver_gather(
@@ -832,6 +1182,7 @@ def main() -> None:
         cbar_label="Vx [m/s]",
         out_path=out_dir / "02_receiver_vx.png",
         normalized=False,
+        arrival_times=arrivals_receiver,
     )
 
     plot_receiver_gather(
@@ -842,15 +1193,17 @@ def main() -> None:
         cbar_label="Vz [m/s]",
         out_path=out_dir / "03_receiver_vz.png",
         normalized=False,
+        arrival_times=arrivals_receiver,
     )
 
     plot_das_gather(
         t=run_result.t,
         das_result=das_result,
         receivers=receivers,
-        title=f"SAFOD forward: DAS strain-rate, GL={gauge_length_m:.4f} m",
+        title=f"SAFOD forward {event_id_for_title}: DAS strain-rate, GL={gauge_length_m:.4f} m",
         out_path=out_dir / "04_das_strain_rate.png",
         normalized=False,
+        arrival_times=arrivals_das,
     )
 
     plot_receiver_gather(
@@ -861,6 +1214,7 @@ def main() -> None:
         cbar_label="Trace-normalized amplitude",
         out_path=out_dir / "02b_receiver_vx_normalized.png",
         normalized=True,
+        arrival_times=arrivals_receiver,
     )
 
     plot_receiver_gather(
@@ -871,15 +1225,17 @@ def main() -> None:
         cbar_label="Trace-normalized amplitude",
         out_path=out_dir / "03b_receiver_vz_normalized.png",
         normalized=True,
+        arrival_times=arrivals_receiver,
     )
 
     plot_das_gather(
         t=run_result.t,
         das_result=das_result,
         receivers=receivers,
-        title=f"SAFOD forward: DAS trace-normalized, GL={gauge_length_m:.4f} m",
+        title=f"SAFOD forward {event_id_for_title}: DAS trace-normalized, GL={gauge_length_m:.4f} m",
         out_path=out_dir / "04b_das_strain_rate_normalized.png",
         normalized=True,
+        arrival_times=arrivals_das,
     )
 
     # --------------------------------------------------------------------------
@@ -903,6 +1259,16 @@ def main() -> None:
         receiver_z=receivers.z,
         receiver_s=receivers.s,
 
+        arrival_s_receiver=arrivals_receiver["s"],
+        arrival_p_receiver=arrivals_receiver["P"],
+        arrival_swave_receiver=arrivals_receiver["S"],
+
+        arrival_s_das=arrivals_das["s"],
+        arrival_p_das=arrivals_das["P"],
+        arrival_swave_das=arrivals_das["S"],
+        arrival_time_shift_s=np.array(source_time_shift_s),
+        arrival_method=np.array(arrivals_receiver["method"]),
+
         x_cable_raw=x_cable_raw,
         z_cable_raw=z_cable_raw,
         x_cable_used=x_cable_use,
@@ -913,9 +1279,14 @@ def main() -> None:
         source_ix=np.array(source.ix),
         source_iz=np.array(source.iz),
         source_spreading=np.array(source.spreading),
-        source_theta_deg=np.array(35.0),
-        source_f0_hz=np.array(6.0),
-        source_scalar_moment=np.array(1.0e12),
+        source_mode=np.array(source_mode),
+        event_id=np.array(event_cfg["event_id"] if event_cfg is not None else "deep_saf"),
+        event_origin_time=np.array(event_cfg["origin_time"] if event_cfg is not None else ""),
+        event_crossline_m=np.array(event_cfg["event_crossline_m"] if event_cfg is not None else np.nan),
+
+        source_theta_deg=np.array(source_theta_deg),
+        source_f0_hz=np.array(source_f0_hz),
+        source_scalar_moment=np.array(source_scalar_moment),
 
         grid_x=grid.x,
         grid_z=grid.z,
