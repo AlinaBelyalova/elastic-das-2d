@@ -25,7 +25,7 @@ from scripts.safod.settings import (
     GEOMETRY_CSV,
     REAL_EVENT_PACKAGE,
 )
-from src.signal_processing import bandpass_traces
+from src.signal_processing import bandpass_traces, median_welch_psd
 
 
 # ==============================================================================
@@ -67,6 +67,22 @@ RIDGE_SMOOTH_WINDOW = 31
 # Interval used for apparent-velocity and residual statistics.
 FIT_CH_MIN = 550.0
 FIT_CH_MAX = 1550.0
+
+# Frequency-content QC windows (diagnostic only, not picks)
+PSD_CHANNEL_MIN = 550.0
+PSD_CHANNEL_MAX = 1550.0
+
+REAL_NOISE_TMIN_S = -1.8
+REAL_NOISE_TMAX_S = -0.5
+
+REAL_SIGNAL_TMIN_S = 0.2
+REAL_SIGNAL_TMAX_S = 1.8
+
+SYN_SIGNAL_TMIN_S = 0.0
+SYN_SIGNAL_TMAX_S = 1.8
+
+PSD_SEGMENT_LENGTH_S = 1.0
+PSD_PLOT_FMAX_HZ = 100.0
 
 
 # ==============================================================================
@@ -531,6 +547,212 @@ def estimate_apparent_velocity(
         "n": n_valid,
     }
 
+
+def _relative_db(
+    psd: np.ndarray,
+    *,
+    reference_peak: float | None = None,
+    eps: float = 1e-300,
+) -> np.ndarray:
+    """Convert a non-negative PSD curve to dB relative to a chosen peak."""
+    psd = np.asarray(psd, dtype=np.float64)
+
+    if reference_peak is None:
+        reference_peak = float(np.nanmax(psd))
+
+    if not np.isfinite(reference_peak) or reference_peak <= 0.0:
+        raise ValueError(
+            f"Invalid PSD reference peak: {reference_peak}"
+        )
+
+    return 10.0 * np.log10(
+        np.maximum(psd, eps) / max(reference_peak, eps)
+    )
+
+
+def plot_frequency_qc(
+    *,
+    real_data_unfiltered: np.ndarray,
+    real_time_s: np.ndarray,
+    real_channels: np.ndarray,
+    real_fs_hz: float,
+    synthetic_data_unfiltered: np.ndarray,
+    synthetic_time_shifted_s: np.ndarray,
+    synthetic_channels: np.ndarray,
+    synthetic_fs_hz: float,
+    out_figure: Path,
+    out_csv: Path,
+) -> None:
+    """
+    Compare real pre-event noise, real event signal, and synthetic spectral
+    content before the common comparison bandpass is applied.
+    """
+
+    real_trace_mask = (
+        np.isfinite(real_channels)
+        & (real_channels >= PSD_CHANNEL_MIN)
+        & (real_channels <= PSD_CHANNEL_MAX)
+    )
+    synthetic_trace_mask = (
+        np.isfinite(synthetic_channels)
+        & (synthetic_channels >= PSD_CHANNEL_MIN)
+        & (synthetic_channels <= PSD_CHANNEL_MAX)
+    )
+
+    f_real, real_signal_psd, real_signal_p10, real_signal_p90 = median_welch_psd(
+        real_data_unfiltered,
+        real_time_s,
+        fs_hz=real_fs_hz,
+        tmin_s=REAL_SIGNAL_TMIN_S,
+        tmax_s=REAL_SIGNAL_TMAX_S,
+        trace_mask=real_trace_mask,
+        segment_length_s=PSD_SEGMENT_LENGTH_S,
+    )
+
+    f_noise, real_noise_psd, _, _ = median_welch_psd(
+        real_data_unfiltered,
+        real_time_s,
+        fs_hz=real_fs_hz,
+        tmin_s=REAL_NOISE_TMIN_S,
+        tmax_s=REAL_NOISE_TMAX_S,
+        trace_mask=real_trace_mask,
+        segment_length_s=PSD_SEGMENT_LENGTH_S,
+    )
+
+    f_syn, synthetic_psd, synthetic_p10, synthetic_p90 = median_welch_psd(
+        synthetic_data_unfiltered,
+        synthetic_time_shifted_s,
+        fs_hz=synthetic_fs_hz,
+        tmin_s=SYN_SIGNAL_TMIN_S,
+        tmax_s=SYN_SIGNAL_TMAX_S,
+        trace_mask=synthetic_trace_mask,
+        segment_length_s=PSD_SEGMENT_LENGTH_S,
+    )
+
+    if not np.array_equal(f_real, f_noise):
+        real_noise_psd = np.interp(f_real, f_noise, real_noise_psd)
+
+    eps = 1e-300
+    real_snr_db = 10.0 * np.log10(
+        np.maximum(real_signal_psd, eps) / np.maximum(real_noise_psd, eps)
+    )
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    ax0, ax1 = axes
+
+    # Spectrum-shape comparison. Real signal, real noise, and synthetic
+    # are independently normalized because absolute 2D synthetic amplitudes
+    # are not calibrated. Percentile bands use the corresponding median peak.
+    real_signal_peak = float(np.nanmax(real_signal_psd))
+    real_noise_peak = float(np.nanmax(real_noise_psd))
+    synthetic_peak = float(np.nanmax(synthetic_psd))
+
+    ax0.plot(
+        f_real,
+        _relative_db(
+            real_signal_psd,
+            reference_peak=real_signal_peak,
+        ),
+        label="Real event window",
+        linewidth=1.5,
+    )
+    ax0.fill_between(
+        f_real,
+        _relative_db(
+            real_signal_p10,
+            reference_peak=real_signal_peak,
+        ),
+        _relative_db(
+            real_signal_p90,
+            reference_peak=real_signal_peak,
+        ),
+        alpha=0.15,
+    )
+
+    ax0.plot(
+        f_real,
+        _relative_db(
+            real_noise_psd,
+            reference_peak=real_noise_peak,
+        ),
+        label="Real pre-event noise",
+        linewidth=1.2,
+    )
+
+    ax0.plot(
+        f_syn,
+        _relative_db(
+            synthetic_psd,
+            reference_peak=synthetic_peak,
+        ),
+        label="Synthetic",
+        linewidth=1.5,
+    )
+    ax0.fill_between(
+        f_syn,
+        _relative_db(
+            synthetic_p10,
+            reference_peak=synthetic_peak,
+        ),
+        _relative_db(
+            synthetic_p90,
+            reference_peak=synthetic_peak,
+        ),
+        alpha=0.12,
+    )
+
+    ax0.axvspan(
+        FMIN_COMPARE_HZ,
+        FMAX_COMPARE_HZ,
+        alpha=0.12,
+        label=f"Common band {FMIN_COMPARE_HZ:g}–{FMAX_COMPARE_HZ:g} Hz",
+    )
+
+    ax0.set_ylabel("Median PSD relative to peak [dB]")
+    ax0.set_ylim(-80.0, 5.0)
+    ax0.grid(alpha=0.3)
+    ax0.legend(fontsize=9)
+
+    # Real SNR
+    ax1.plot(f_real, real_snr_db, linewidth=1.4)
+    ax1.axhline(0.0, linestyle="--", linewidth=1.0)
+    ax1.axvspan(FMIN_COMPARE_HZ, FMAX_COMPARE_HZ, alpha=0.12)
+    ax1.set_xlabel("Frequency [Hz]")
+    ax1.set_ylabel("Real signal / noise PSD [dB]")
+    ax1.grid(alpha=0.3)
+
+    max_f = min(
+        PSD_PLOT_FMAX_HZ,
+        float(np.nanmax(f_real)),
+        float(np.nanmax(f_syn)),
+    )
+    ax1.set_xlim(0.0, max_f)
+
+    fig.suptitle(
+        "SAFOD real/synthetic frequency-content QC\n"
+        "Curves are independently normalized; compare spectral shape, not absolute scale."
+    )
+    fig.tight_layout()
+    fig.savefig(out_figure, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+    synthetic_interp = np.interp(
+        f_real,
+        f_syn,
+        synthetic_psd,
+        left=np.nan,
+        right=np.nan,
+    )
+
+    pd.DataFrame(
+        {
+            "frequency_hz": f_real,
+            "real_signal_psd": real_signal_psd,
+            "real_noise_psd": real_noise_psd,
+            "real_signal_to_noise_db": real_snr_db,
+            "synthetic_psd_interpolated": synthetic_interp,
+        }
+    ).to_csv(out_csv, index=False)
 
 # ==============================================================================
 # PLOTTING HELPERS
@@ -1365,6 +1587,29 @@ def main() -> None:
                 f"synthetic DAS traces {expected_traces}."
             )
 
+    # --------------------------------------------------------------------------
+    # Frequency-content QC before the common comparison bandpass
+    # --------------------------------------------------------------------------
+    frequency_figure_path = (
+        OUT_DIR / "00_frequency_content_qc.png"
+    )
+    frequency_csv_path = (
+        OUT_DIR / "frequency_content_qc.csv"
+    )
+
+    plot_frequency_qc(
+        real_data_unfiltered=real_data_unfiltered_full,
+        real_time_s=real_time_full,
+        real_channels=real_channels,
+        real_fs_hz=real_fs,
+        synthetic_data_unfiltered=synthetic_data_unfiltered_full,
+        synthetic_time_shifted_s=synthetic_time_shifted_full,
+        synthetic_channels=synthetic_channels,
+        synthetic_fs_hz=synthetic_fs,
+        out_figure=frequency_figure_path,
+        out_csv=frequency_csv_path,
+    )
+
     # Sort waveform, envelope and arrival curves using exactly the same order.
     (
         synthetic_channels,
@@ -1543,6 +1788,11 @@ def main() -> None:
     print(f"event id                 : {event_id}")
     print(f"source f0                : {source_f0_hz:.2f} Hz")
     print(f"source theta             : {source_theta_deg:.2f} deg")
+    print(
+        "common comparison band   : "
+        f"{FMIN_COMPARE_HZ:.1f} to {FMAX_COMPARE_HZ:.1f} Hz, "
+        "zero phase"
+    )
     print(f"real DAS shape           : {real_data.shape}")
     print(f"synthetic DAS shape      : {synthetic_data.shape}")
 
@@ -1670,6 +1920,11 @@ def main() -> None:
                 "source_f0_hz": source_f0_hz,
                 "source_theta_deg": source_theta_deg,
                 "synthetic_display_shift_s": SYN_DISPLAY_TIME_SHIFT_S,
+                "common_fmin_hz": FMIN_COMPARE_HZ,
+                "common_fmax_hz": FMAX_COMPARE_HZ,
+                "filter_order": FILTER_ORDER,
+                "filter_taper_frac": FILTER_TAPER_FRAC,
+                "filter_phase": "zero_phase_sosfiltfilt_both",
                 "ridge_type": "guided_dominant_envelope_ridge",
                 "ridge_fit_ch_min": FIT_CH_MIN,
                 "ridge_fit_ch_max": FIT_CH_MAX,
@@ -1790,6 +2045,8 @@ def main() -> None:
 
     print("\nSaved outputs")
     print("-------------")
+    print(frequency_figure_path)
+    print(frequency_csv_path)
     print(real_overlay_path)
     print(signed_comparison_path)
     print(envelope_comparison_path)
