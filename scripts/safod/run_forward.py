@@ -832,22 +832,42 @@ def main() -> None:
     baseline_x_padding_m = 800.0
     baseline_z_max_m = 9000.0
 
-    x_padding_m = (
+    # Physical undamped margins in the original n40 model.
+    baseline_undamped_side_margin_m = (
         baseline_x_padding_m
-        + (n_boundary - baseline_n_boundary) * dx
+        - baseline_n_boundary * dx
     )
-    z_max_m = (
+    baseline_bottom_sponge_entry_m = (
         baseline_z_max_m
-        + (n_boundary - baseline_n_boundary) * dz
+        - baseline_n_boundary * dz
+    )
+
+    # Add real physical model space, not just more absorbing cells.
+    extra_scientific_x_margin_m = 500.0
+
+    x_padding_m = (
+        baseline_undamped_side_margin_m
+        + extra_scientific_x_margin_m
+        + n_boundary * dx
+    )
+
+    z_max_m = (
+        baseline_bottom_sponge_entry_m
+        + n_boundary * dz
     )
 
     print("\nAbsorbing-boundary configuration")
     print("--------------------------------")
-    print(f"n_boundary          : {n_boundary}")
-    print(f"gamma_s             : {gamma_s:.1f}")
-    print(f"sponge width        : {n_boundary * dx:.1f} m")
-    print(f"x padding           : {x_padding_m:.1f} m")
-    print(f"model bottom        : {z_max_m:.1f} m")
+    print(f"n_boundary                 : {n_boundary}")
+    print(f"gamma_s                    : {gamma_s:.1f}")
+    print(f"sponge width               : {n_boundary * dx:.1f} m")
+    print(
+        "undamped side margin      : "
+        f"{baseline_undamped_side_margin_m + extra_scientific_x_margin_m:.1f} m"
+    )
+    print(f"extra scientific x margin  : {extra_scientific_x_margin_m:.1f} m")
+    print(f"total x padding            : {x_padding_m:.1f} m")
+    print(f"model bottom               : {z_max_m:.1f} m")
 
     if source_mode == "catalog_event":
         gauge_length_m = event_cfg["gauge_length_m"]
