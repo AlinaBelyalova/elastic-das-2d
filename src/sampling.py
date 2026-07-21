@@ -10,6 +10,7 @@
 #   - Grid2D provides base coordinates and spacing
 #   - This module precomputes sampling metadata once
 #   - solver_numpy.py can then use only raw NumPy arrays inside the time loop
+#   - scatter_adjoint() applies the exact algebraic transpose of sampling
 #
 # Staggered locations
 #   vx lives at: (x0 + (i + 0.5) dx, z0 + j dz)
@@ -243,7 +244,222 @@ def sample_receivers(
 
 
 # ==============================================================================
-# 6. SELF-TEST
+# 6. ADJOINT SCATTER
+# ==============================================================================
+
+def _scatter_field_adjoint(
+    receiver_values: np.ndarray,
+    sampler: BilinearSampling2D,
+    *,
+    nx: int,
+    nz: int,
+) -> np.ndarray:
+    """
+    Apply the transpose of one bilinear receiver-sampling operator.
+
+    Parameters
+    ----------
+    receiver_values
+        Either:
+            (nrec,)     values for one time sample, or
+            (nrec, nt)  a batch of receiver time samples.
+    sampler
+        Bilinear indices and weights used by the corresponding forward sample.
+    nx, nz
+        Shape of the staggered-grid field.
+
+    Returns
+    -------
+    grid_values
+        Shape:
+            (nx, nz)      for one time sample, or
+            (nx, nz, nt)  for a time batch.
+    """
+    values = np.asarray(
+        receiver_values,
+        dtype=np.float64,
+    )
+
+    if values.ndim not in (1, 2):
+        raise ValueError(
+            "receiver_values must have shape (nrec,) or (nrec, nt); "
+            f"got {values.shape}."
+        )
+
+    if values.shape[0] != sampler.nrec:
+        raise ValueError(
+            "receiver_values first dimension must match sampler.nrec: "
+            f"{values.shape[0]} != {sampler.nrec}."
+        )
+
+    if not np.all(np.isfinite(values)):
+        raise ValueError(
+            "receiver_values contains NaN or Inf."
+        )
+
+    if values.ndim == 1:
+        grid_values = np.zeros(
+            (nx, nz),
+            dtype=np.float64,
+        )
+
+        np.add.at(
+            grid_values,
+            (sampler.ix, sampler.iz),
+            values * sampler.w00,
+        )
+        np.add.at(
+            grid_values,
+            (sampler.ix + 1, sampler.iz),
+            values * sampler.w10,
+        )
+        np.add.at(
+            grid_values,
+            (sampler.ix, sampler.iz + 1),
+            values * sampler.w01,
+        )
+        np.add.at(
+            grid_values,
+            (sampler.ix + 1, sampler.iz + 1),
+            values * sampler.w11,
+        )
+
+        return grid_values
+
+    nt = values.shape[1]
+
+    grid_values = np.zeros(
+        (nx, nz, nt),
+        dtype=np.float64,
+    )
+
+    np.add.at(
+        grid_values,
+        (sampler.ix, sampler.iz, slice(None)),
+        values * sampler.w00[:, None],
+    )
+    np.add.at(
+        grid_values,
+        (sampler.ix + 1, sampler.iz, slice(None)),
+        values * sampler.w10[:, None],
+    )
+    np.add.at(
+        grid_values,
+        (sampler.ix, sampler.iz + 1, slice(None)),
+        values * sampler.w01[:, None],
+    )
+    np.add.at(
+        grid_values,
+        (sampler.ix + 1, sampler.iz + 1, slice(None)),
+        values * sampler.w11[:, None],
+    )
+
+    return grid_values
+
+
+def scatter_adjoint(
+    qx: np.ndarray,
+    qz: np.ndarray,
+    sampling: ReceiverSampling2D,
+    nx: int,
+    nz: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Exact adjoint (transpose) of :func:`sample_receivers`.
+
+    The forward operator independently bilinearly interpolates staggered-grid
+    ``vx`` and ``vz`` fields to the same physical receiver coordinates.  This
+    function scatters receiver-space adjoint values back to those two staggered
+    grids with the identical indices and weights.
+
+    Parameters
+    ----------
+    qx, qz
+        Receiver-space adjoint components.  Both must have the same shape:
+            (nrec,)     for one time sample, or
+            (nrec, nt)  for a batch of time samples.
+    sampling
+        ReceiverSampling2D used by the corresponding forward sampling.
+    nx, nz
+        Shape of each staggered-grid field.
+
+    Returns
+    -------
+    adj_vx, adj_vz
+        Grid-space adjoint fields.  Their shape is:
+            (nx, nz)      for one time sample, or
+            (nx, nz, nt)  for a time batch.
+
+    Notes
+    -----
+    This is the algebraic transpose of ``sample_receivers``:
+
+        <Sx vx, qx> + <Sz vz, qz>
+        =
+        <vx, Sx.T qx> + <vz, Sz.T qz>
+
+    Repeated receiver contributions are accumulated correctly with
+    ``numpy.add.at``.
+    """
+    if isinstance(nx, bool) or int(nx) != nx or int(nx) < 2:
+        raise ValueError(
+            f"nx must be an integer >= 2; got {nx!r}."
+        )
+
+    if isinstance(nz, bool) or int(nz) != nz or int(nz) < 2:
+        raise ValueError(
+            f"nz must be an integer >= 2; got {nz!r}."
+        )
+
+    nx = int(nx)
+    nz = int(nz)
+
+    qx_array = np.asarray(
+        qx,
+        dtype=np.float64,
+    )
+    qz_array = np.asarray(
+        qz,
+        dtype=np.float64,
+    )
+
+    if qx_array.shape != qz_array.shape:
+        raise ValueError(
+            "qx and qz must have identical shapes; "
+            f"got {qx_array.shape} and {qz_array.shape}."
+        )
+
+    if qx_array.ndim not in (1, 2):
+        raise ValueError(
+            "qx and qz must have shape (nrec,) or (nrec, nt); "
+            f"got {qx_array.shape}."
+        )
+
+    if qx_array.shape[0] != sampling.nrec:
+        raise ValueError(
+            "qx/qz first dimension must match sampling.nrec: "
+            f"{qx_array.shape[0]} != {sampling.nrec}."
+        )
+
+    adj_vx = _scatter_field_adjoint(
+        qx_array,
+        sampling.vx,
+        nx=nx,
+        nz=nz,
+    )
+
+    adj_vz = _scatter_field_adjoint(
+        qz_array,
+        sampling.vz,
+        nx=nx,
+        nz=nz,
+    )
+
+    return adj_vx, adj_vz
+
+
+# ==============================================================================
+# 7. SELF-TEST
 # ==============================================================================
 
 def _self_test() -> None:
@@ -356,7 +572,133 @@ def _self_test() -> None:
     assert rec_vx.shape == (nrec, nt)
     print(f"Time loop execution: OK shape={rec_vx.shape}")
 
-    print("\n✓ sampling.py: All tests passed")
+    # 9. Adjoint dot-product test for one time sample.
+    vx_grid = rng.standard_normal((g.nx, g.nz))
+    vz_grid = rng.standard_normal((g.nx, g.nz))
+
+    sampled_vx, sampled_vz = sample_receivers(
+        vx_grid,
+        vz_grid,
+        sampling,
+    )
+
+    qx = rng.standard_normal(nrec)
+    qz = rng.standard_normal(nrec)
+
+    adj_vx, adj_vz = scatter_adjoint(
+        qx,
+        qz,
+        sampling,
+        nx=g.nx,
+        nz=g.nz,
+    )
+
+    lhs = float(
+        np.vdot(sampled_vx, qx)
+        + np.vdot(sampled_vz, qz)
+    )
+    rhs = float(
+        np.vdot(vx_grid, adj_vx)
+        + np.vdot(vz_grid, adj_vz)
+    )
+
+    relative_error = abs(lhs - rhs) / max(
+        abs(lhs),
+        abs(rhs),
+        1.0e-30,
+    )
+
+    assert relative_error < 1.0e-13, (
+        "Receiver-sampling adjoint dot-product test failed: "
+        f"lhs={lhs:.16e}, rhs={rhs:.16e}, "
+        f"relative_error={relative_error:.3e}"
+    )
+
+    print(
+        "Adjoint dot-product test: OK "
+        f"(relative error={relative_error:.3e})"
+    )
+
+    # 10. Batched adjoint scatter must equal independent time-slice scatters.
+    nt_batch = 4
+    qx_batch = rng.standard_normal((nrec, nt_batch))
+    qz_batch = rng.standard_normal((nrec, nt_batch))
+
+    adj_vx_batch, adj_vz_batch = scatter_adjoint(
+        qx_batch,
+        qz_batch,
+        sampling,
+        nx=g.nx,
+        nz=g.nz,
+    )
+
+    assert adj_vx_batch.shape == (
+        g.nx,
+        g.nz,
+        nt_batch,
+    )
+    assert adj_vz_batch.shape == (
+        g.nx,
+        g.nz,
+        nt_batch,
+    )
+
+    for it in range(nt_batch):
+        adj_vx_one, adj_vz_one = scatter_adjoint(
+            qx_batch[:, it],
+            qz_batch[:, it],
+            sampling,
+            nx=g.nx,
+            nz=g.nz,
+        )
+
+        assert np.allclose(
+            adj_vx_batch[:, :, it],
+            adj_vx_one,
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert np.allclose(
+            adj_vz_batch[:, :, it],
+            adj_vz_one,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    print("Batched adjoint scatter: OK")
+
+    # 11. Adjoint shape guards.
+    try:
+        scatter_adjoint(
+            np.zeros(nrec - 1),
+            np.zeros(nrec - 1),
+            sampling,
+            nx=g.nx,
+            nz=g.nz,
+        )
+        raise AssertionError(
+            "Expected receiver-count mismatch failure."
+        )
+    except ValueError:
+        pass
+
+    try:
+        scatter_adjoint(
+            np.zeros(nrec),
+            np.zeros((nrec, 1)),
+            sampling,
+            nx=g.nx,
+            nz=g.nz,
+        )
+        raise AssertionError(
+            "Expected qx/qz shape mismatch failure."
+        )
+    except ValueError:
+        pass
+
+    print("Adjoint shape guards: OK")
+
+    print("\nsampling.py: all self-tests passed")
 
 
 if __name__ == "__main__":

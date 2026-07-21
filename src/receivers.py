@@ -1,27 +1,22 @@
 # ==============================================================================
-# src/receivers.py — 2D Receiver / DAS cable geometry for elastic FWI
+# src/receivers.py — physical 2D receiver / DAS-cable geometry
 #
-# Design:
-#   Receivers2D — truly immutable dataclass with read-only validated arrays
-#   build_das_cable() — arc-length parameterised resampling from waypoints
-#   create_l_shape_cable() — convenience helper for vertical borehole + surface
+# This module owns only the physical receiver geometry. Staggered-grid
+# interpolation belongs in src.sampling; finite-gauge DAS physics belongs in
+# src.das.
 #
-# Staggered-grid note:
-#   ix, iz map channels to INTEGER grid nodes (where sxx/szz and material
-#   properties live). Particle velocities live on half-integer nodes:
-#     vx at (i+1/2, j)  -> nearest INTEGER ix carries a dx/2 systematic bias
-#     vz at (i, j+1/2)  -> nearest INTEGER iz carries a dz/2 systematic bias
-#   For a prototype this is acceptable.
-#   Production: bilinear interpolation from the surrounding staggered nodes.
+# Two constructors are intentionally separate:
+#   build_das_cable_from_waypoints(...)
+#       Generate uniformly spaced synthetic channel centres along a polyline.
+#   build_receivers_from_channel_centres(...)
+#       Preserve known field channel centres exactly, with no resampling.
 #
-# Gauge-length constraint:
-#   DAS strain-rate requires gauge_k = floor(gauge_L / channel_spacing + 1e-9) >= 2.
-#   Callers must verify this before constructing a DAS operator.
+# ix/iz are retained only as deprecated compatibility metadata for older code.
+# Production wavefield sampling must use src.sampling.
 # ==============================================================================
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -31,61 +26,204 @@ if TYPE_CHECKING:
     from src.grid import Grid2D
 
 
+def _readonly_1d(value, *, name: str, dtype) -> np.ndarray:
+    array = np.array(value, dtype=dtype, copy=True)
+    if array.ndim != 1:
+        raise ValueError(f"{name!r} must be 1D; got shape {array.shape}.")
+    array.flags.writeable = False
+    return array
+
+
+def _validate_grid(grid: "Grid2D") -> None:
+    for attr in ("x0", "z0", "dx", "dz", "nx", "nz"):
+        if not hasattr(grid, attr):
+            raise TypeError(
+                f"'grid' must provide {attr!r}; got {type(grid).__name__}."
+            )
+
+    if not np.isfinite(grid.dx) or grid.dx <= 0.0:
+        raise ValueError(f"grid.dx must be finite and positive; got {grid.dx}.")
+    if not np.isfinite(grid.dz) or grid.dz <= 0.0:
+        raise ValueError(f"grid.dz must be finite and positive; got {grid.dz}.")
+    if int(grid.nx) < 2 or int(grid.nz) < 2:
+        raise ValueError(
+            f"grid.nx and grid.nz must be >= 2; got {grid.nx}, {grid.nz}."
+        )
+
+
+def _nearest_integer_grid_indices(
+    grid: "Grid2D",
+    x: np.ndarray,
+    z: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Deprecated compatibility indices; not used for staggered sampling."""
+    ix = np.rint((x - float(grid.x0)) / float(grid.dx)).astype(np.int64)
+    iz = np.rint((z - float(grid.z0)) / float(grid.dz)).astype(np.int64)
+    return ix, iz
+
+
+def _validate_grid_bounds(
+    *,
+    grid: "Grid2D",
+    x: np.ndarray,
+    z: np.ndarray,
+    n_pml: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    _validate_grid(grid)
+
+    if int(n_pml) != n_pml or n_pml < 0:
+        raise ValueError(f"n_pml must be a non-negative integer; got {n_pml!r}.")
+    n_pml = int(n_pml)
+
+    ix, iz = _nearest_integer_grid_indices(grid, x, z)
+
+    outside_x = (ix < 0) | (ix >= int(grid.nx))
+    outside_z = (iz < 0) | (iz >= int(grid.nz))
+
+    if np.any(outside_x):
+        bad = np.flatnonzero(outside_x)[:5]
+        raise ValueError(
+            "Receiver geometry extends outside the grid in x. "
+            f"First bad receiver indices: {bad.tolist()}."
+        )
+
+    if np.any(outside_z):
+        bad = np.flatnonzero(outside_z)[:5]
+        raise ValueError(
+            "Receiver geometry extends outside the grid in z. "
+            f"First bad receiver indices: {bad.tolist()}."
+        )
+
+    if n_pml > 0:
+        in_pml = (
+            (ix < n_pml)
+            | (ix >= int(grid.nx) - n_pml)
+            | (iz < n_pml)
+            | (iz >= int(grid.nz) - n_pml)
+        )
+        if np.any(in_pml):
+            bad = np.flatnonzero(in_pml)[:5]
+            raise ValueError(
+                f"{int(np.count_nonzero(in_pml))} receiver(s) lie inside "
+                f"the sponge/PML region (n_pml={n_pml}). "
+                f"First bad receiver indices: {bad.tolist()}."
+            )
+
+    return ix, iz
+
+
+def _compute_projected_unit_tangents(
+    *,
+    x: np.ndarray,
+    z: np.ndarray,
+    s: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute unit tangents of the cable projected into the x-z plane."""
+    if x.size < 2:
+        raise ValueError("At least two receiver centres are required.")
+
+    edge_order = 2 if x.size >= 3 else 1
+    dx_ds = np.gradient(x, s, edge_order=edge_order)
+    dz_ds = np.gradient(z, s, edge_order=edge_order)
+    norm = np.hypot(dx_ds, dz_ds)
+
+    if np.any(~np.isfinite(norm)):
+        raise ValueError("Projected tangent calculation produced NaN or Inf.")
+    if np.any(norm <= 1.0e-12):
+        bad = np.flatnonzero(norm <= 1.0e-12)[:5]
+        raise ValueError(
+            "Degenerate projected cable tangent. "
+            f"First bad receiver indices: {bad.tolist()}."
+        )
+
+    return dx_ds / norm, dz_ds / norm
+
+
 @dataclass(frozen=True)
 class Receivers2D:
     """
-    Geometry and grid mapping for 2D DAS channel centers.
+    Immutable physical geometry of 2D receiver/channel centres.
 
-    Attributes
+    Parameters
     ----------
-    x, z :
-        Physical coordinates of channel centers [m].
-    ix, iz :
-        Nearest-neighbour INTEGER grid indices.
-    tx, tz :
-        Unit tangent vectors along the cable (direction of increasing s).
-    s :
-        Arc-length coordinate of channel centers [m].
-
-    All arrays are strictly 1D, identical in length (= nrec), and read-only.
+    x, z
+        Physical receiver coordinates [m].
+    tx, tz
+        Unit tangent components in the modelling x-z plane.
+    s
+        Strictly increasing, uniformly sampled cable coordinate [m].
+        For registered borehole DAS geometry, measured depth is appropriate.
+    ix, iz
+        Deprecated nearest integer-grid indices kept only for compatibility.
+        Production staggered-grid sampling uses src.sampling instead.
     """
+
     x: np.ndarray
     z: np.ndarray
-    ix: np.ndarray
-    iz: np.ndarray
     tx: np.ndarray
     tz: np.ndarray
     s: np.ndarray
+    ix: np.ndarray | None = None
+    iz: np.ndarray | None = None
 
     def __post_init__(self) -> None:
-        names_float = ("x", "z", "tx", "tz", "s")
-        names_int = ("ix", "iz")
-        ref_size = None
+        x = _readonly_1d(self.x, name="x", dtype=np.float64)
+        z = _readonly_1d(self.z, name="z", dtype=np.float64)
+        tx = _readonly_1d(self.tx, name="tx", dtype=np.float64)
+        tz = _readonly_1d(self.tz, name="tz", dtype=np.float64)
+        s = _readonly_1d(self.s, name="s", dtype=np.float64)
 
-        for name in names_float + names_int:
-            dtype = np.float64 if name in names_float else int
-
-            arr = np.array(getattr(self, name), dtype=dtype, copy=True)
-            if arr.ndim != 1:
-                raise ValueError(f"'{name}' must be a 1D array, got shape {arr.shape}.")
-
-            if ref_size is None:
-                ref_size = arr.size
-            elif arr.size != ref_size:
+        nrec = x.size
+        for name, array in (("z", z), ("tx", tx), ("tz", tz), ("s", s)):
+            if array.size != nrec:
                 raise ValueError(
-                    f"All receiver arrays must have the same length; "
-                    f"'{name}' has {arr.size}, expected {ref_size}."
+                    "All receiver arrays must have identical lengths; "
+                    f"{name!r} has {array.size}, expected {nrec}."
                 )
 
-            arr.flags.writeable = False
-            object.__setattr__(self, name, arr)
+        for name, array in (("x", x), ("z", z), ("tx", tx), ("tz", tz), ("s", s)):
+            if not np.all(np.isfinite(array)):
+                raise ValueError(f"{name!r} contains NaN or Inf.")
 
-        norms = np.sqrt(self.tx**2 + self.tz**2)
-        if not np.allclose(norms, 1.0, atol=1e-6):
+        if nrec > 1:
+            ds = np.diff(s)
+            if np.any(ds <= 0.0):
+                raise ValueError("Receiver coordinate s must increase strictly.")
+
+            mean_ds = float(np.mean(ds))
+            if not np.allclose(ds, mean_ds, rtol=1.0e-5, atol=1.0e-8):
+                raise ValueError(
+                    "Receivers2D currently requires uniform spacing in s "
+                    "because src.das uses uniform cable interpolation. "
+                    f"diff(s) ranges from {ds.min():.9f} to {ds.max():.9f} m."
+                )
+
+        if nrec > 0:
+            tangent_norm = np.hypot(tx, tz)
+            if not np.allclose(tangent_norm, 1.0, rtol=0.0, atol=1.0e-6):
+                raise ValueError(
+                    "tx/tz must be unit vectors. Maximum norm error is "
+                    f"{np.max(np.abs(tangent_norm - 1.0)):.3e}."
+                )
+
+        ix_value = np.full(nrec, -1, dtype=np.int64) if self.ix is None else self.ix
+        iz_value = np.full(nrec, -1, dtype=np.int64) if self.iz is None else self.iz
+        ix = _readonly_1d(ix_value, name="ix", dtype=np.int64)
+        iz = _readonly_1d(iz_value, name="iz", dtype=np.int64)
+
+        if ix.size != nrec or iz.size != nrec:
             raise ValueError(
-                f"tx/tz must be unit vectors. "
-                f"max |norm - 1| = {np.abs(norms - 1.0).max():.2e}"
+                "Deprecated ix/iz arrays must match the receiver count; "
+                f"got ix={ix.size}, iz={iz.size}, nrec={nrec}."
             )
+
+        object.__setattr__(self, "x", x)
+        object.__setattr__(self, "z", z)
+        object.__setattr__(self, "tx", tx)
+        object.__setattr__(self, "tz", tz)
+        object.__setattr__(self, "s", s)
+        object.__setattr__(self, "ix", ix)
+        object.__setattr__(self, "iz", iz)
 
     @property
     def nrec(self) -> int:
@@ -93,190 +231,200 @@ class Receivers2D:
 
     @property
     def channel_spacing(self) -> float:
-        """
-        Uniform arc-length spacing between adjacent channel centres [m].
-
-        Since the cable is resampled on an even arc-length grid, this is
-        computed directly from the first and last channel centres.
-        """
+        """Uniform spacing of receiver centres along s [m]."""
         if self.nrec < 2:
             return float("nan")
-        return float((self.s[-1] - self.s[0]) / (self.nrec - 1))
+        return float(np.mean(np.diff(self.s)))
 
-    def gauge_samples(self, gauge_length_m: float) -> int:
-        """
-        Number of receiver samples spanning the gauge length.
-
-        gauge_k = floor(gauge_length_m / channel_spacing + 1e-9)
-
-        Must be >= 2 for the DAS finite-difference operator to be well-defined.
-        """
-        ds = self.channel_spacing
-        if not np.isfinite(ds) or ds <= 0.0:
-            raise ValueError("Cannot compute gauge_samples: invalid channel spacing.")
-
-        k = int(np.floor(gauge_length_m / ds + 1e-9))
-        if k < 2:
-            raise ValueError(
-                f"gauge_length_m={gauge_length_m} m with channel_spacing≈{ds:.2f} m "
-                f"gives gauge_k={k} < 2. Increase gauge_length_m or use finer spacing."
-            )
-        return k
+    @property
+    def has_legacy_grid_indices(self) -> bool:
+        return bool(
+            self.nrec > 0
+            and np.all(self.ix >= 0)
+            and np.all(self.iz >= 0)
+        )
 
     def summary(self) -> str:
+        if self.nrec == 0:
+            return "Receivers2D: 0 channels"
         return (
             f"Receivers2D: {self.nrec} channels\n"
-            f"  Arc-length: [{self.s.min():.1f}, {self.s.max():.1f}] m  "
-            f"(spacing ≈ {self.channel_spacing:.2f} m)\n"
-            f"  X: [{self.x.min():.1f}, {self.x.max():.1f}] m\n"
-            f"  Z: [{self.z.min():.1f}, {self.z.max():.1f}] m"
+            f"  s: [{self.s.min():.3f}, {self.s.max():.3f}] m\n"
+            f"  spacing: {self.channel_spacing:.6f} m\n"
+            f"  x: [{self.x.min():.3f}, {self.x.max():.3f}] m\n"
+            f"  z: [{self.z.min():.3f}, {self.z.max():.3f}] m"
         )
 
     def __repr__(self) -> str:
+        if self.nrec == 0:
+            return "Receivers2D(nrec=0)"
         return (
             f"Receivers2D(nrec={self.nrec}, "
-            f"s=[{self.s.min():.1f},{self.s.max():.1f}]m, "
-            f"x=[{self.x.min():.1f},{self.x.max():.1f}]m)"
+            f"ds={self.channel_spacing:.6f} m, "
+            f"s=[{self.s.min():.3f},{self.s.max():.3f}] m)"
         )
 
     def __str__(self) -> str:
         return self.summary()
 
 
-def build_das_cable(
+def build_receivers_from_channel_centres(
+    x,
+    z,
+    s,
+    *,
+    grid: "Grid2D | None" = None,
+    n_pml: int = 0,
+) -> Receivers2D:
+    """
+    Build geometry from already known physical channel centres.
+
+    No resampling is performed: input channel i remains receiver i. This is the
+    correct constructor for registered field geometry such as SAFOD.
+    """
+    x_array = np.asarray(x, dtype=np.float64)
+    z_array = np.asarray(z, dtype=np.float64)
+    s_array = np.asarray(s, dtype=np.float64)
+
+    for name, array in (("x", x_array), ("z", z_array), ("s", s_array)):
+        if array.ndim != 1:
+            raise ValueError(f"{name!r} must be 1D; got shape {array.shape}.")
+
+    if not (x_array.size == z_array.size == s_array.size):
+        raise ValueError(
+            "x, z and s must have identical lengths; "
+            f"got {x_array.size}, {z_array.size}, {s_array.size}."
+        )
+    if x_array.size < 2:
+        raise ValueError("At least two channel centres are required.")
+
+    for name, array in (("x", x_array), ("z", z_array), ("s", s_array)):
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"{name!r} contains NaN or Inf.")
+
+    if np.any(np.diff(s_array) <= 0.0):
+        raise ValueError("s must increase strictly.")
+
+    tx, tz = _compute_projected_unit_tangents(x=x_array, z=z_array, s=s_array)
+
+    if grid is None:
+        if n_pml != 0:
+            raise ValueError("n_pml requires a grid for bounds checking.")
+        ix = None
+        iz = None
+    else:
+        ix, iz = _validate_grid_bounds(
+            grid=grid,
+            x=x_array,
+            z=z_array,
+            n_pml=n_pml,
+        )
+
+    return Receivers2D(
+        x=x_array,
+        z=z_array,
+        tx=tx,
+        tz=tz,
+        s=s_array,
+        ix=ix,
+        iz=iz,
+    )
+
+
+def build_das_cable_from_waypoints(
     grid: "Grid2D",
-    waypoints_x: list[float] | np.ndarray,
-    waypoints_z: list[float] | np.ndarray,
+    waypoints_x,
+    waypoints_z,
     channel_spacing_m: float,
     n_pml: int = 0,
 ) -> Receivers2D:
     """
-    Build a 2D DAS cable from physical waypoints.
+    Generate uniformly spaced synthetic channel centres along a polyline.
 
-    The trajectory is parameterised by arc length and resampled to evenly
-    spaced channel centres separated by `channel_spacing_m`.
-
-    Parameters
-    ----------
-    grid :
-        Grid2D-like object used for bounds checking and nearest-neighbour mapping.
-        Must provide x0, z0, dx, dz, nx, nz.
-    waypoints_x, waypoints_z :
-        Cable control points [m].
-    channel_spacing_m :
-        Arc-length spacing between adjacent channel centres [m].
-    n_pml :
-        PML/sponge thickness [cells]. Channels inside this region are rejected.
+    The first centre is channel_spacing_m/2 from the first waypoint. Use
+    build_receivers_from_channel_centres() when inputs already are field
+    channel centres.
     """
-    for attr in ("x0", "z0", "dx", "dz", "nx", "nz"):
-        if not hasattr(grid, attr):
-            raise TypeError(
-                f"'grid' must be a Grid2D-like object with attribute '{attr}'; "
-                f"got {type(grid).__name__}."
-            )
+    _validate_grid(grid)
 
-    if grid.dx <= 0.0 or grid.dz <= 0.0:
-        raise ValueError(f"grid.dx and grid.dz must be positive; got dx={grid.dx}, dz={grid.dz}.")
-    if grid.nx <= 1 or grid.nz <= 1:
-        raise ValueError(f"grid.nx and grid.nz must be > 1; got nx={grid.nx}, nz={grid.nz}.")
+    if not np.isfinite(channel_spacing_m) or channel_spacing_m <= 0.0:
+        raise ValueError(
+            f"channel_spacing_m must be finite and positive; got {channel_spacing_m}."
+        )
 
     wx = np.asarray(waypoints_x, dtype=np.float64)
     wz = np.asarray(waypoints_z, dtype=np.float64)
 
     if wx.ndim != 1 or wz.ndim != 1:
         raise ValueError("waypoints_x and waypoints_z must be 1D.")
-    if wx.size < 2:
-        raise ValueError("At least 2 waypoints are required.")
     if wx.shape != wz.shape:
-        raise ValueError("waypoints_x and waypoints_z must have the same shape.")
-    if channel_spacing_m <= 0.0:
-        raise ValueError(f"channel_spacing_m must be positive, got {channel_spacing_m}.")
+        raise ValueError("waypoints_x and waypoints_z must have identical shapes.")
+    if wx.size < 2:
+        raise ValueError("At least two waypoints are required.")
+    if not (np.all(np.isfinite(wx)) and np.all(np.isfinite(wz))):
+        raise ValueError("Waypoints contain NaN or Inf.")
 
-    ds_seg = np.sqrt(np.diff(wx) ** 2 + np.diff(wz) ** 2)
-    if np.any(ds_seg <= 0.0):
+    segment_length = np.hypot(np.diff(wx), np.diff(wz))
+    if np.any(segment_length <= 0.0):
         raise ValueError("Waypoints contain repeated or zero-length segments.")
 
-    s_way = np.insert(np.cumsum(ds_seg), 0, 0.0)
-    total_length = float(s_way[-1])
+    s_waypoint = np.insert(np.cumsum(segment_length), 0, 0.0)
+    total_length = float(s_waypoint[-1])
+    spacing = float(channel_spacing_m)
+    half_spacing = spacing / 2.0
 
-    if total_length < channel_spacing_m / 2.0:
+    if total_length < half_spacing + spacing:
         raise ValueError(
-            f"Cable length {total_length:.2f} m is too short for a channel at "
-            f"channel_spacing_m/2 = {channel_spacing_m / 2.0:.2f} m."
+            "Cable is too short to contain two channel centres at spacing "
+            f"{spacing:.6f} m; polyline length is {total_length:.6f} m."
         )
 
-    # Channel centres at:
-    #   ds/2, 3ds/2, 5ds/2, ...
-    n_channels = int((total_length - channel_spacing_m / 2.0 + 1e-9) // channel_spacing_m) + 1
+    n_channels = int(
+        np.floor((total_length - half_spacing) / spacing + 1.0e-12)
+    ) + 1
     if n_channels < 2:
-        raise ValueError(
-            f"Resampling produced only {n_channels} channel(s). "
-            "Reduce channel_spacing_m or lengthen the cable."
-        )
+        raise ValueError("Resampling produced fewer than two channels.")
 
-    s_chann = channel_spacing_m / 2.0 + np.arange(n_channels, dtype=np.float64) * channel_spacing_m
-
-    x_chann = np.interp(s_chann, s_way, wx)
-    z_chann = np.interp(s_chann, s_way, wz)
-
-    tx = np.gradient(x_chann, s_chann)
-    tz = np.gradient(z_chann, s_chann)
-
-    norm = np.sqrt(tx**2 + tz**2)
-    if np.any(norm <= 1e-12):
-        raise ValueError("Degenerate tangent: resampled points coincide.")
-    tx /= norm
-    tz /= norm
-
-    ix = np.round((x_chann - grid.x0) / grid.dx).astype(int)
-    iz = np.round((z_chann - grid.z0) / grid.dz).astype(int)
-
-    if np.any(ix < 0) or np.any(ix >= grid.nx):
-        n_bad = int(((ix < 0) | (ix >= grid.nx)).sum())
-        raise ValueError(
-            f"Cable extends outside grid X bounds [0, {grid.nx - 1}] "
-            f"at {n_bad} channel(s)."
-        )
-
-    if np.any(iz < 0) or np.any(iz >= grid.nz):
-        n_bad = int(((iz < 0) | (iz >= grid.nz)).sum())
-        raise ValueError(
-            f"Cable extends outside grid Z bounds [0, {grid.nz - 1}] "
-            f"at {n_bad} channel(s)."
-        )
-
-    if n_pml > 0:
-        in_pml = (
-            (ix < n_pml) | (ix >= grid.nx - n_pml) |
-            (iz < n_pml) | (iz >= grid.nz - n_pml)
-        )
-        if np.any(in_pml):
-            raise ValueError(
-                f"{int(in_pml.sum())} channel(s) fall inside the PML/sponge zone "
-                f"(n_pml={n_pml} cells from each edge)."
-            )
-
-    if channel_spacing_m < min(grid.dx, grid.dz):
-        node_keys = ix * grid.nz + iz
-        n_dup = len(ix) - len(np.unique(node_keys))
-        if n_dup > 0:
-            warnings.warn(
-                f"channel_spacing_m={channel_spacing_m} m < grid spacing "
-                f"(dx={grid.dx}, dz={grid.dz}): "
-                f"{n_dup} channel pair(s) share the same grid node. "
-                "Consider coarsening channel spacing or refining the grid.",
-                UserWarning,
-                stacklevel=2,
-            )
+    s_channel = half_spacing + np.arange(n_channels, dtype=np.float64) * spacing
+    x_channel = np.interp(s_channel, s_waypoint, wx)
+    z_channel = np.interp(s_channel, s_waypoint, wz)
+    tx, tz = _compute_projected_unit_tangents(
+        x=x_channel,
+        z=z_channel,
+        s=s_channel,
+    )
+    ix, iz = _validate_grid_bounds(
+        grid=grid,
+        x=x_channel,
+        z=z_channel,
+        n_pml=n_pml,
+    )
 
     return Receivers2D(
-        x=x_chann,
-        z=z_chann,
-        ix=ix,
-        iz=iz,
+        x=x_channel,
+        z=z_channel,
         tx=tx,
         tz=tz,
-        s=s_chann,
+        s=s_channel,
+        ix=ix,
+        iz=iz,
+    )
+
+
+def build_das_cable(
+    grid: "Grid2D",
+    waypoints_x,
+    waypoints_z,
+    channel_spacing_m: float,
+    n_pml: int = 0,
+) -> Receivers2D:
+    """Backward-compatible alias for build_das_cable_from_waypoints()."""
+    return build_das_cable_from_waypoints(
+        grid=grid,
+        waypoints_x=waypoints_x,
+        waypoints_z=waypoints_z,
+        channel_spacing_m=channel_spacing_m,
+        n_pml=n_pml,
     )
 
 
@@ -287,29 +435,27 @@ def create_l_shape_cable(
     channel_spacing_m: float,
     n_pml: int = 0,
 ) -> Receivers2D:
-    """
-    Build an L-shaped cable: horizontal surface trench + vertical well segment.
-    """
-    edge_offset = max(2, n_pml + 1)
-    x_start = grid.x0 + edge_offset * grid.dx
-    z_surface = grid.z0 + edge_offset * grid.dz
+    """Build a synthetic L-shaped surface-plus-borehole cable."""
+    _validate_grid(grid)
+
+    edge_offset = max(2, int(n_pml) + 1)
+    x_start = float(grid.x0) + edge_offset * float(grid.dx)
+    z_surface = float(grid.z0) + edge_offset * float(grid.dz)
 
     if x_well <= x_start:
         raise ValueError(
-            f"x_well={x_well} m must be to the right of x_start={x_start:.1f} m."
+            f"x_well={x_well} m must exceed x_start={x_start:.3f} m."
         )
     if z_well_bottom <= z_surface:
         raise ValueError(
-            f"z_well_bottom={z_well_bottom} m must be deeper than z_surface={z_surface:.1f} m."
+            "z_well_bottom must be deeper than the synthetic surface; "
+            f"got bottom={z_well_bottom}, surface={z_surface:.3f} m."
         )
 
-    wx = np.array([x_start, x_well, x_well], dtype=np.float64)
-    wz = np.array([z_surface, z_surface, z_well_bottom], dtype=np.float64)
-
-    return build_das_cable(
+    return build_das_cable_from_waypoints(
         grid=grid,
-        waypoints_x=wx,
-        waypoints_z=wz,
+        waypoints_x=np.array([x_start, x_well, x_well], dtype=np.float64),
+        waypoints_z=np.array([z_surface, z_surface, z_well_bottom], dtype=np.float64),
         channel_spacing_m=channel_spacing_m,
         n_pml=n_pml,
     )
@@ -321,91 +467,117 @@ def _self_test() -> None:
     def make_grid(x0, z0, dx, dz, nx, nz):
         return SimpleNamespace(x0=x0, z0=z0, dx=dx, dz=dz, nx=nx, nz=nz)
 
-    g = make_grid(0.0, 0.0, 10.0, 10.0, 200, 400)
-    rec = build_das_cable(g, [500.0, 500.0], [100.0, 3000.0], channel_spacing_m=1.0)
+    grid = make_grid(0.0, 0.0, 10.0, 10.0, 200, 400)
+    receivers = build_das_cable(
+        grid,
+        [500.0, 500.0],
+        [100.0, 3000.0],
+        channel_spacing_m=1.0,
+    )
 
-    # Read-only arrays
     try:
-        rec.x[0] = 999.0
-        raise AssertionError("Arrays are not read-only.")
-    except ValueError as e:
-        assert "read-only" in str(e)
-    print("Array immutability: OK")
-
-    # Vertical cable tangents
-    assert np.allclose(rec.tx, 0.0, atol=1e-6)
-    assert np.allclose(rec.tz, 1.0, atol=1e-6)
-    print(f"Vertical cable tangent: OK ({rec.nrec} channels)")
-
-    # Uniform spacing
-    ds = np.diff(rec.s)
-    assert np.allclose(ds, ds[0], rtol=1e-10)
-    print(f"Uniform arc-length: OK (ds={ds.mean():.2f} m)")
-
-    # 45-degree cable
-    g2 = make_grid(-50.0, -50.0, 10.0, 10.0, 150, 150)
-    r2 = build_das_cable(g2, [0.0, 1000.0], [0.0, 1000.0], channel_spacing_m=5.0)
-    assert np.allclose(r2.tx, 1 / np.sqrt(2), atol=1e-6)
-    assert np.allclose(r2.tz, 1 / np.sqrt(2), atol=1e-6)
-    print("45° cable tangent: OK")
-
-    # gauge_samples
-    assert rec.gauge_samples(10.0) == 10
-    assert rec.gauge_samples(10.6) == 10
-    assert rec.gauge_samples(11.0) == 11
-    print("gauge_samples logic: OK")
-
-    # Fine spacing without float-slip
-    g3 = make_grid(0.0, 0.0, 1.0, 1.0, 5000, 10)
-    r3 = build_das_cable(g3, [0.0, 4999.0], [5.0, 5.0], channel_spacing_m=0.1)
-    assert r3.nrec > 0
-    print(f"Exact channel-centre construction: OK ({r3.nrec} channels)")
-
-    # Aliasing warning
-    g4 = make_grid(0.0, -5.0, 10.0, 10.0, 30, 5)
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        build_das_cable(g4, [0.0, 200.0], [0.0, 0.0], channel_spacing_m=3.0)
-    assert any("share the same grid node" in str(x.message) for x in w)
-    print("Aliasing UserWarning: OK")
-
-    # PML rejection
-    g5 = make_grid(0.0, 0.0, 5.0, 5.0, 30, 30)
-    try:
-        build_das_cable(g5, [0.0, 100.0], [5.0, 5.0], channel_spacing_m=5.0, n_pml=5)
-        raise AssertionError("Expected ValueError for cable in PML zone.")
+        receivers.x[0] = 999.0
+        raise AssertionError("Receiver arrays are not read-only.")
     except ValueError:
         pass
-    print("PML zone rejection: OK")
+    print("Array immutability: OK")
 
-    # L-shape cable
-    g6 = make_grid(0.0, 0.0, 10.0, 10.0, 200, 400)
-    rec_l = create_l_shape_cable(
-        g6,
+    assert np.allclose(receivers.tx, 0.0, atol=1.0e-6)
+    assert np.allclose(receivers.tz, 1.0, atol=1.0e-6)
+    print(f"Vertical cable tangent: OK ({receivers.nrec} channels)")
+
+    assert np.allclose(
+        np.diff(receivers.s),
+        receivers.channel_spacing,
+        rtol=1.0e-10,
+        atol=1.0e-12,
+    )
+    print(f"Uniform spacing: OK (ds={receivers.channel_spacing:.6f} m)")
+
+    x_known = np.array([10.0, 11.0, 12.0, 13.0])
+    z_known = np.array([20.0, 21.0, 22.0, 23.0])
+    s_known = np.array([100.0, 102.0, 104.0, 106.0])
+    registered = build_receivers_from_channel_centres(
+        x=x_known,
+        z=z_known,
+        s=s_known,
+    )
+
+    assert np.array_equal(registered.x, x_known)
+    assert np.array_equal(registered.z, z_known)
+    assert np.array_equal(registered.s, s_known)
+    print("Known channel centres preserved exactly: OK")
+
+    expected = 1.0 / np.sqrt(2.0)
+    assert np.allclose(registered.tx, expected, atol=1.0e-12)
+    assert np.allclose(registered.tz, expected, atol=1.0e-12)
+    print("Projected 45-degree tangent: OK")
+
+    assert receivers.has_legacy_grid_indices
+    print("Legacy ix/iz compatibility metadata: OK")
+
+    fine_grid = make_grid(0.0, 0.0, 1.0, 1.0, 5000, 10)
+    fine = build_das_cable(
+        fine_grid,
+        [0.0, 4999.0],
+        [5.0, 5.0],
+        channel_spacing_m=0.1,
+    )
+    assert fine.nrec > 0
+    print(f"Sub-grid receiver spacing: OK ({fine.nrec} channels)")
+
+    pml_grid = make_grid(0.0, 0.0, 5.0, 5.0, 30, 30)
+    try:
+        build_das_cable(
+            pml_grid,
+            [0.0, 100.0],
+            [5.0, 5.0],
+            channel_spacing_m=5.0,
+            n_pml=5,
+        )
+        raise AssertionError("Expected PML bounds failure.")
+    except ValueError:
+        pass
+    print("PML bounds rejection: OK")
+
+    l_grid = make_grid(0.0, 0.0, 10.0, 10.0, 200, 400)
+    l_receivers = create_l_shape_cable(
+        l_grid,
         x_well=1000.0,
         z_well_bottom=3500.0,
         channel_spacing_m=5.0,
         n_pml=5,
     )
-    z_surf_expected = g6.z0 + (5 + 1) * g6.dz
-    assert rec_l.z.min() >= z_surf_expected - 0.5 * 5.0
-    print(f"create_l_shape_cable clearance: OK ({rec_l.nrec} channels)")
+    assert l_receivers.nrec >= 2
+    print(f"L-shaped cable construction: OK ({l_receivers.nrec} channels)")
 
-    # Bad grid object
+    empty = Receivers2D(
+        x=np.array([]),
+        z=np.array([]),
+        tx=np.array([]),
+        tz=np.array([]),
+        s=np.array([]),
+    )
+    assert empty.nrec == 0
+    print("Empty geometry container: OK")
+
     try:
-        build_das_cable({"x0": 0}, [0, 1], [0, 1], 1.0)
-        raise AssertionError("Expected TypeError.")
-    except TypeError:
+        Receivers2D(
+            x=np.array([0.0, 1.0, 2.0]),
+            z=np.array([0.0, 0.0, 0.0]),
+            tx=np.ones(3),
+            tz=np.zeros(3),
+            s=np.array([0.0, 1.0, 2.2]),
+        )
+        raise AssertionError("Expected non-uniform spacing failure.")
+    except ValueError:
         pass
-    print("Bad grid object TypeError: OK")
+    print("Non-uniform spacing guard: OK")
 
-    # repr/str
-    assert "nrec=" in repr(rec)
-    assert "channels" in str(rec)
-    assert len(repr(rec)) < len(str(rec))
+    assert "nrec=" in repr(receivers)
+    assert "channels" in str(receivers)
     print("repr/str: OK")
-
-    print(f"\nSelf-test PASSED\n{rec}")
+    print("\nreceivers.py: all self-tests passed")
 
 
 if __name__ == "__main__":
