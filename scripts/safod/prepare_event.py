@@ -38,6 +38,7 @@ import DASutils  # noqa: E402
 # USER SETTINGS
 # ==============================================================================
 from scripts.safod.settings import (
+    CHANNEL_MAPPING_CSV,
     COMMON_FMAX_HZ,
     COMMON_FMIN_HZ,
     DAS_DB_PY,
@@ -162,7 +163,9 @@ def fetch_event_from_ncedc() -> dict:
         )
 
     if len(cat) == 0:
-        raise RuntimeError("NCEDC query returned no events for NC75336802.")
+        raise RuntimeError(
+            f"NCEDC query returned no events for {event_id_raw}."
+        )
 
     expected_t = UTCDateTime(EVENT["origin_time"])
 
@@ -214,6 +217,10 @@ def fetch_event_from_ncedc() -> dict:
 # GEOMETRY / PROJECTION HELPERS
 # ==============================================================================
 
+MIN_BOREHOLE_TVD_M = 10.0
+MIN_BOREHOLE_MD_M = 10.0
+
+
 def latlon_to_local_enu_m(lat, lon, lat0, lon0):
     """
     Small-area local tangent-plane approximation.
@@ -232,118 +239,109 @@ def latlon_to_local_enu_m(lat, lon, lat0, lon0):
     return east, north
 
 
-def build_channel_projection_mapping():
+def _integer_index(values, *, name: str) -> np.ndarray:
+    """Convert an integer-valued column to a validated int64 array."""
+    values_float = pd.to_numeric(
+        values,
+        errors="raise",
+    ).to_numpy(dtype=np.float64)
+
+    values_int = np.rint(values_float).astype(np.int64)
+
+    if not np.allclose(
+        values_float,
+        values_int,
+        rtol=0.0,
+        atol=1.0e-9,
+    ):
+        raise ValueError(
+            f"{name} values must be integer-valued."
+        )
+
+    return values_int
+
+
+def _load_reference_geometry_context() -> dict:
     """
-    Build real-event 2D geometry directly from the georeferenced channel table.
+    Load the one unchanged physical SAFOD cable geometry and define the
+    common 2D profile coordinate system.
 
-    SAFOD Phase2 / DualPulse channel table contains:
-        surface spool -> down-going borehole pass -> up-going return pass.
-
-    For 2D elastic forward modelling we keep only:
-        down-going borehole pass,
-    and remove surface spool / repeated near-surface zero-TVD channels.
-
-    Resulting model coordinates:
-        X_2D_m = along-profile horizontal coordinate [m]
-        Z_2D_m = TVD depth [m]
+    This function is independent of the interrogator configuration.
     """
-    geo = pd.read_excel(GEO_XLSX)
+    geo = pd.read_excel(
+        GEO_XLSX,
+        engine="openpyxl",
+    )
 
-    required_geo = [
+    required = [
         "Channel",
         "Lat_WGS84",
         "Lon_WGS84",
         "TVD_m",
         "MD_m",
-        "Horiz_Disp_m",
     ]
 
-    for col in required_geo:
-        if col not in geo.columns:
-            raise ValueError(f"Missing column {col!r} in {GEO_XLSX}")
+    missing = sorted(
+        set(required).difference(geo.columns)
+    )
+
+    if missing:
+        raise ValueError(
+            f"Reference geometry is missing columns {missing}: {GEO_XLSX}"
+        )
 
     geo = geo.copy()
 
-    for col in required_geo:
-        geo[col] = pd.to_numeric(geo[col], errors="coerce")
+    for column in required:
+        geo[column] = pd.to_numeric(
+            geo[column],
+            errors="coerce",
+        )
 
-    geo = geo.replace([np.inf, -np.inf], np.nan).dropna(
-        subset=["Channel", "Lat_WGS84", "Lon_WGS84", "TVD_m", "MD_m"]
+    geo = (
+        geo
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=required)
+        .sort_values("Channel")
+        .groupby("Channel", as_index=False)
+        .median(numeric_only=True)
     )
 
-    geo = geo.sort_values("Channel")
-    geo = geo.groupby("Channel", as_index=False).median(numeric_only=True)
-
     if len(geo) < 10:
-        raise RuntimeError(f"Too few georeferenced rows: {len(geo)}")
+        raise RuntimeError(
+            f"Too few valid rows in reference geometry: {len(geo)}"
+        )
 
-    # --------------------------------------------------------------------------
-    # 1. Detect DualPulse turn-around and keep only down-going pass
-    # --------------------------------------------------------------------------
     tvd_full = geo["TVD_m"].to_numpy(dtype=np.float64)
     md_full = geo["MD_m"].to_numpy(dtype=np.float64)
     channel_full = geo["Channel"].to_numpy(dtype=np.float64)
 
     turn_idx = int(np.nanargmax(tvd_full))
-    turn_channel = float(channel_full[turn_idx])
-    turn_tvd_m = float(tvd_full[turn_idx])
-    turn_md_m = float(md_full[turn_idx])
-
-    n_rows_full = len(geo)
 
     geo_down = geo.iloc[: turn_idx + 1].copy()
-    n_rows_downleg_including_spool = len(geo_down)
-
-    # --------------------------------------------------------------------------
-    # 2. Remove surface spool / repeated zero-depth channels
-    # --------------------------------------------------------------------------
-    MIN_BOREHOLE_TVD_M = 10.0
-    MIN_BOREHOLE_MD_M = 10.0
 
     borehole_mask = (
-        (geo_down["TVD_m"].to_numpy(dtype=np.float64) >= MIN_BOREHOLE_TVD_M)
-        & (geo_down["MD_m"].to_numpy(dtype=np.float64) >= MIN_BOREHOLE_MD_M)
+        geo_down["TVD_m"].to_numpy(dtype=np.float64)
+        >= MIN_BOREHOLE_TVD_M
+    ) & (
+        geo_down["MD_m"].to_numpy(dtype=np.float64)
+        >= MIN_BOREHOLE_MD_M
     )
 
     if np.count_nonzero(borehole_mask) < 10:
         raise RuntimeError(
-            "Too few borehole rows after removing surface spool. "
-            f"Rows left: {np.count_nonzero(borehole_mask)}"
+            "Too few reference down-leg rows after removing the "
+            f"surface spool: {np.count_nonzero(borehole_mask)}"
         )
 
-    first_borehole_pos = int(np.argmax(borehole_mask))
-    first_borehole_channel = float(geo_down.iloc[first_borehole_pos]["Channel"])
-
+    first_borehole_pos = int(np.flatnonzero(borehole_mask)[0])
     geo_model = geo_down.iloc[first_borehole_pos:].copy()
-    n_rows_downleg_model = len(geo_model)
 
-    d_tvd_model = np.diff(geo_model["TVD_m"].to_numpy(dtype=np.float64))
-    n_decreasing = int(np.sum(d_tvd_model < -1.0))
-
-    print("\nDual-pass / surface-spool geometry fix")
-    print("--------------------------------------")
-    print(f"rows before truncation       : {n_rows_full}")
-    print(f"turn-around row index        : {turn_idx}")
-    print(f"turn-around channel          : {turn_channel:.1f}")
-    print(f"turn-around TVD / MD         : {turn_tvd_m:.1f} / {turn_md_m:.1f} m")
-    print(f"rows down-pass incl. spool   : {n_rows_downleg_including_spool}")
-    print(f"first borehole channel kept  : {first_borehole_channel:.1f}")
-    print(f"rows after spool trimming    : {n_rows_downleg_model}")
-    print(f"TVD-decreasing segments left : {n_decreasing}")
-
-    if n_decreasing > 0:
-        print(
-            "WARNING: down-going pass is still not perfectly monotonic in TVD. "
-            "Small local survey/interpolation noise may be okay, but check geometry."
-        )
-
-    # --------------------------------------------------------------------------
-    # 3. Projection reference and profile direction
-    # --------------------------------------------------------------------------
-    # Use original channel 0 as physical surface reference.
-    surf = geo.iloc[0]
-    lat0 = float(surf["Lat_WGS84"])
-    lon0 = float(surf["Lon_WGS84"])
+    # The profile origin and direction are defined once from the unchanged
+    # reference cable, exactly as in the original April workflow.
+    surface = geo.iloc[0]
+    lat0 = float(surface["Lat_WGS84"])
+    lon0 = float(surface["Lon_WGS84"])
 
     east_down, north_down = latlon_to_local_enu_m(
         geo_down["Lat_WGS84"].to_numpy(dtype=np.float64),
@@ -355,6 +353,7 @@ def build_channel_projection_mapping():
     tvd_down = geo_down["TVD_m"].to_numpy(dtype=np.float64)
 
     deep_mask = tvd_down > np.nanpercentile(tvd_down, 90.0)
+
     if np.count_nonzero(deep_mask) < 5:
         deep_mask = tvd_down > np.nanpercentile(tvd_down, 80.0)
 
@@ -362,71 +361,241 @@ def build_channel_projection_mapping():
     n_deep = float(np.nanmedian(north_down[deep_mask]))
 
     norm = float(np.hypot(e_deep, n_deep))
-    if norm <= 0.0 or not np.isfinite(norm):
-        raise RuntimeError("Could not define profile direction from georeferenced cable.")
+
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise RuntimeError(
+            "Could not define the 2D profile direction from the "
+            "reference cable geometry."
+        )
 
     u_e = e_deep / norm
     u_n = n_deep / norm
 
-    east, north = latlon_to_local_enu_m(
-        geo_model["Lat_WGS84"].to_numpy(dtype=np.float64),
-        geo_model["Lon_WGS84"].to_numpy(dtype=np.float64),
-        lat0,
-        lon0,
+    return {
+        "geo_full": geo,
+        "geo_down": geo_down,
+        "geo_model": geo_model,
+        "lat0": lat0,
+        "lon0": lon0,
+        "u_e": float(u_e),
+        "u_n": float(u_n),
+        "reference_turn_channel": float(channel_full[turn_idx]),
+        "reference_turn_tvd_m": float(tvd_full[turn_idx]),
+        "reference_turn_md_m": float(md_full[turn_idx]),
+        "reference_first_borehole_channel": float(
+            geo_down.iloc[first_borehole_pos]["Channel"]
+        ),
+    }
+
+
+def _finalize_channel_mapping(
+    geo_model: pd.DataFrame,
+    *,
+    context: dict,
+    source_description: str,
+    first_borehole_channel: float,
+    turn_channel: float,
+    turn_tvd_m: float,
+    turn_md_m: float,
+) -> dict:
+    """
+    Project one event's receiver table into the common 2D coordinates,
+    save the standard geometry CSV, and return the schema expected by main().
+    """
+    out = geo_model.copy()
+
+    required = [
+        "Channel",
+        "data_idx",
+        "Lat_WGS84",
+        "Lon_WGS84",
+        "TVD_m",
+        "MD_m",
+    ]
+
+    missing = sorted(
+        set(required).difference(out.columns)
     )
 
-    tvd = geo_model["TVD_m"].to_numpy(dtype=np.float64)
+    if missing:
+        raise ValueError(
+            f"Receiver mapping is missing columns: {missing}"
+        )
 
-    along = east * u_e + north * u_n
-    cross = -east * u_n + north * u_e
+    for column in [
+        "Channel",
+        "Lat_WGS84",
+        "Lon_WGS84",
+        "TVD_m",
+        "MD_m",
+    ]:
+        out[column] = pd.to_numeric(
+            out[column],
+            errors="raise",
+        )
 
-    model_x = along
-    model_z = tvd
+    out["data_idx"] = _integer_index(
+        out["data_idx"],
+        name="data_idx",
+    )
 
-    out = geo_model.copy()
+    data_idx = out["data_idx"].to_numpy(dtype=np.int64)
+
+    if np.any(np.diff(data_idx) <= 0):
+        raise ValueError(
+            "Receiver data_idx values must increase strictly."
+        )
+
+    if not np.all(np.diff(data_idx) == 1):
+        raise ValueError(
+            "The current down-leg receiver mapping must be contiguous."
+        )
+
+    md_m = out["MD_m"].to_numpy(dtype=np.float64)
+    tvd_m = out["TVD_m"].to_numpy(dtype=np.float64)
+
+    if not np.all(np.isfinite(md_m)) or not np.all(np.isfinite(tvd_m)):
+        raise ValueError(
+            "MD_m and TVD_m must contain only finite values."
+        )
+
+    if np.any(np.diff(md_m) <= 0.0):
+        raise ValueError(
+            "Mapped down-leg MD_m must increase strictly."
+        )
+
+    if np.any(np.diff(tvd_m) < -1.0e-6):
+        raise ValueError(
+            "Mapped down-leg TVD_m must not decrease."
+        )
+
+    east, north = latlon_to_local_enu_m(
+        out["Lat_WGS84"].to_numpy(dtype=np.float64),
+        out["Lon_WGS84"].to_numpy(dtype=np.float64),
+        context["lat0"],
+        context["lon0"],
+    )
+
+    along = (
+        east * context["u_e"]
+        + north * context["u_n"]
+    )
+    cross = (
+        -east * context["u_n"]
+        + north * context["u_e"]
+    )
+
     out["east_m_from_surface"] = east
     out["north_m_from_surface"] = north
     out["along_profile_m"] = along
     out["cross_profile_m"] = cross
-    out["X_2D_m"] = model_x
-    out["Z_2D_m"] = model_z
+    out["X_2D_m"] = along
+    out["Z_2D_m"] = tvd_m
 
-    out_csv = OUT_DIR / "SAFOD_Phase2_projected_from_georef.csv"
-    out.to_csv(out_csv, index=False)
+    model_x = out["X_2D_m"].to_numpy(dtype=np.float64)
+    model_z = out["Z_2D_m"].to_numpy(dtype=np.float64)
 
-    # --------------------------------------------------------------------------
-    # 4. Geometry QC
-    # --------------------------------------------------------------------------
     dx_seg = np.diff(model_x)
     dz_seg = np.diff(model_z)
-    arc_length_m = float(np.sum(np.sqrt(dx_seg * dx_seg + dz_seg * dz_seg)))
 
-    x_range = float(np.nanmax(model_x) - np.nanmin(model_x))
-    z_range = float(np.nanmax(model_z) - np.nanmin(model_z))
+    arc_length_m = float(
+        np.sum(
+            np.hypot(dx_seg, dz_seg)
+        )
+    )
 
-    straight_bound = float(np.hypot(x_range, z_range))
-    monotonic_bound = float(x_range + z_range)
+    x_range = float(
+        np.nanmax(model_x) - np.nanmin(model_x)
+    )
+    z_range = float(
+        np.nanmax(model_z) - np.nanmin(model_z)
+    )
 
-    fit_rms_m = float(np.sqrt(np.nanmean(cross ** 2)))
+    straight_bound = float(
+        np.hypot(x_range, z_range)
+    )
+    monotonic_bound = float(
+        x_range + z_range
+    )
 
-    print("\nGeoreferenced channel projection QC: down-going borehole only")
-    print("------------------------------------------------------------")
-    print(f"geo rows used             : {len(out)}")
-    print(f"surface lat/lon           : {lat0:.7f}, {lon0:.7f}")
-    print(f"profile unit vector EN    : ({u_e:.4f}, {u_n:.4f})")
-    print(f"channel range used        : {out['Channel'].min():.1f} to {out['Channel'].max():.1f}")
-    print(f"TVD range used            : {np.nanmin(model_z):.1f} to {np.nanmax(model_z):.1f} m")
-    print(f"model x range used        : {np.nanmin(model_x):.1f} to {np.nanmax(model_x):.1f} m")
-    print(f"computed cable arc length : {arc_length_m:.1f} m")
-    print(f"arc length sanity bounds  : {straight_bound:.1f} to {monotonic_bound:.1f} m")
-    print(f"crossline cable range     : {np.nanmin(cross):.1f} to {np.nanmax(cross):.1f} m")
-    print(f"cable-to-profile-line RMS : {fit_rms_m:.2f} m")
-    print(f"saved model geometry      : {out_csv}")
+    fit_rms_m = float(
+        np.sqrt(
+            np.nanmean(cross ** 2)
+        )
+    )
+
+    out_csv = (
+        OUT_DIR
+        / "SAFOD_Phase2_projected_from_georef.csv"
+    )
+
+    out.to_csv(
+        out_csv,
+        index=False,
+    )
+
+    print("\nReceiver geometry / channel registration")
+    print("----------------------------------------")
+    print(f"source                     : {source_description}")
+    print(f"geometry rows              : {len(out)}")
+    print(
+        "data-row range             : "
+        f"{data_idx[0]} to {data_idx[-1]}"
+    )
+    print(
+        "raw-channel range          : "
+        f"{out['Channel'].iloc[0]:.1f} to "
+        f"{out['Channel'].iloc[-1]:.1f}"
+    )
+    print(
+        "MD range                   : "
+        f"{np.nanmin(md_m):.1f} to "
+        f"{np.nanmax(md_m):.1f} m"
+    )
+    print(
+        "TVD range                  : "
+        f"{np.nanmin(model_z):.1f} to "
+        f"{np.nanmax(model_z):.1f} m"
+    )
+    print(
+        "model x range              : "
+        f"{np.nanmin(model_x):.1f} to "
+        f"{np.nanmax(model_x):.1f} m"
+    )
+    print(
+        "surface lat/lon            : "
+        f"{context['lat0']:.7f}, "
+        f"{context['lon0']:.7f}"
+    )
+    print(
+        "profile unit vector EN     : "
+        f"({context['u_e']:.4f}, "
+        f"{context['u_n']:.4f})"
+    )
+    print(
+        "computed cable arc length  : "
+        f"{arc_length_m:.1f} m"
+    )
+    print(
+        "arc-length sanity bounds   : "
+        f"{straight_bound:.1f} to "
+        f"{monotonic_bound:.1f} m"
+    )
+    print(
+        "crossline cable range      : "
+        f"{np.nanmin(cross):.1f} to "
+        f"{np.nanmax(cross):.1f} m"
+    )
+    print(
+        "cable-to-profile-line RMS  : "
+        f"{fit_rms_m:.2f} m"
+    )
+    print(f"saved model geometry       : {out_csv}")
 
     if arc_length_m > 1.15 * monotonic_bound:
         print(
-            "WARNING: computed arc length is much larger than the monotonic bound. "
-            "Geometry may still include duplicated/reversed path segments."
+            "WARNING: computed arc length is much larger than the "
+            "monotonic bound. Check for duplicated or reversed geometry."
         )
 
     fig, ax = plt.subplots(figsize=(6, 8))
@@ -447,33 +616,177 @@ def build_channel_projection_mapping():
         s=50,
         label="bottom / turn-around",
     )
-    ax.set_xlabel("2D model x = along-profile coordinate [m]")
+    ax.set_xlabel(
+        "2D model x = along-profile coordinate [m]"
+    )
     ax.set_ylabel("TVD depth [m]")
-    ax.set_title("SAFOD Phase2 down-going borehole pass projected to 2D")
-    ax.set_ylim(np.nanmax(model_z), 0)
+    ax.set_title(
+        "SAFOD down-going borehole pass projected to 2D"
+    )
+    ax.set_ylim(np.nanmax(model_z), 0.0)
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
-    fig.savefig(OUT_DIR / "real_cable_projected_geometry_downpass_only.png", dpi=220)
+    fig.savefig(
+        OUT_DIR
+        / "real_cable_projected_geometry_downpass_only.png",
+        dpi=220,
+    )
     plt.close(fig)
 
     return {
-        "lat0": lat0,
-        "lon0": lon0,
-        "u_e": float(u_e),
-        "u_n": float(u_n),
+        "lat0": context["lat0"],
+        "lon0": context["lon0"],
+        "u_e": context["u_e"],
+        "u_n": context["u_n"],
         "geometry_csv": str(out_csv),
         "mapping_table": out,
         "fit_rms_m": fit_rms_m,
-        "turn_channel": turn_channel,
-        "turn_tvd_m": turn_tvd_m,
-        "turn_md_m": turn_md_m,
-        "first_borehole_channel": first_borehole_channel,
+        "turn_channel": float(turn_channel),
+        "turn_tvd_m": float(turn_tvd_m),
+        "turn_md_m": float(turn_md_m),
+        "first_borehole_channel": float(first_borehole_channel),
         "arc_length_m": arc_length_m,
-        "n_rows_full": n_rows_full,
-        "n_rows_downleg_including_spool": n_rows_downleg_including_spool,
-        "n_rows_downleg_model": n_rows_downleg_model,
+        "n_rows_full": len(context["geo_full"]),
+        "n_rows_downleg_including_spool": len(
+            context["geo_down"]
+        ),
+        "n_rows_downleg_model": len(out),
     }
+
+
+def load_event_channel_mapping(
+    path: Path,
+    *,
+    context: dict,
+) -> dict:
+    """
+    Load an event-specific mapping from HDF5 data rows to the unchanged
+    physical cable geometry.
+
+    The CSV changes only the data-row registration.  The physical profile
+    origin, direction, MD, TVD, latitude, and longitude remain tied to the
+    common SAFOD reference geometry.
+    """
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Channel-mapping CSV not found: {path}"
+        )
+
+    geo = pd.read_csv(path)
+
+    required = [
+        "DataRow",
+        "MD_m",
+        "TVD_m",
+        "Lat_WGS84",
+        "Lon_WGS84",
+    ]
+
+    missing = sorted(
+        set(required).difference(geo.columns)
+    )
+
+    if missing:
+        raise ValueError(
+            "Channel-mapping CSV is missing required columns "
+            f"{missing}: {path}"
+        )
+
+    geo = geo.copy()
+
+    data_rows = _integer_index(
+        geo["DataRow"],
+        name="DataRow",
+    )
+
+    if np.any(np.diff(data_rows) <= 0):
+        raise ValueError(
+            "DataRow values must increase strictly."
+        )
+
+    if not np.all(np.diff(data_rows) == 1):
+        raise ValueError(
+            "Mapped down-leg DataRow values must be contiguous."
+        )
+
+    # These are indices into the current HDF5 array.  They are not old
+    # interrogator channel numbers and they do not redefine the borehole.
+    geo["data_idx"] = data_rows
+    geo["Channel"] = data_rows.astype(np.float64)
+
+    return _finalize_channel_mapping(
+        geo,
+        context=context,
+        source_description=(
+            f"event-specific HDF5-row registration: {path}"
+        ),
+        first_borehole_channel=float(data_rows[0]),
+        turn_channel=float(data_rows[-1]),
+        turn_tvd_m=float(
+            pd.to_numeric(
+                geo["TVD_m"],
+                errors="raise",
+            ).iloc[-1]
+        ),
+        turn_md_m=float(
+            pd.to_numeric(
+                geo["MD_m"],
+                errors="raise",
+            ).iloc[-1]
+        ),
+    )
+
+
+def build_channel_projection_mapping() -> dict:
+    """
+    Build one consistent receiver mapping for the active event.
+
+    April:
+        reference Excel channel numbers already index the HDF5 rows.
+
+    June:
+        CHANNEL_MAPPING_CSV maps the new HDF5 rows onto the same physical
+        reference cable geometry.
+    """
+    context = _load_reference_geometry_context()
+
+    if CHANNEL_MAPPING_CSV is not None:
+        return load_event_channel_mapping(
+            CHANNEL_MAPPING_CSV,
+            context=context,
+        )
+
+    geo_model = context["geo_model"].copy()
+
+    channel_indices = _integer_index(
+        geo_model["Channel"],
+        name="reference Channel",
+    )
+
+    geo_model["data_idx"] = channel_indices
+
+    return _finalize_channel_mapping(
+        geo_model,
+        context=context,
+        source_description=(
+            f"reference Excel channel registration: {GEO_XLSX}"
+        ),
+        first_borehole_channel=float(
+            channel_indices[0]
+        ),
+        turn_channel=float(
+            channel_indices[-1]
+        ),
+        turn_tvd_m=float(
+            geo_model["TVD_m"].iloc[-1]
+        ),
+        turn_md_m=float(
+            geo_model["MD_m"].iloc[-1]
+        ),
+    )
 
 
 def project_event_to_model(mapping: dict, event_meta: dict) -> dict:
@@ -612,26 +925,39 @@ def main() -> None:
     ev_proj = project_event_to_model(mapping, event_meta)
 
     # --------------------------------------------------------------------------
-    # 3b. Crop real DAS to down-going borehole pass only
+    # 3b. Select the exact HDF5 rows represented by the geometry mapping
     # --------------------------------------------------------------------------
-    raw_channels_full = np.arange(
-        D_event_unfiltered_full.shape[0], dtype=np.float64
+    mapping_table = mapping["mapping_table"]
+
+    data_indices = _integer_index(
+        mapping_table["data_idx"],
+        name="mapping data_idx",
     )
 
-    first_borehole_channel = float(mapping["first_borehole_channel"])
-    turn_channel = float(mapping["turn_channel"])
+    n_raw_channels = D_event_unfiltered_full.shape[0]
 
-    raw_max = float(raw_channels_full[-1])
-    downleg_min_channel = max(first_borehole_channel, float(raw_channels_full[0]))
-    downleg_max_channel = min(turn_channel, raw_max)
+    if data_indices[0] < 0 or data_indices[-1] >= n_raw_channels:
+        raise IndexError(
+            "Geometry mapping references HDF5 rows outside the data array: "
+            f"{data_indices[0]} to {data_indices[-1]}, "
+            f"but the file contains rows 0 to {n_raw_channels - 1}."
+        )
 
-    downleg_mask = (
-        (raw_channels_full >= downleg_min_channel)
-        & (raw_channels_full <= downleg_max_channel)
-    )
+    D_event_unfiltered = D_event_unfiltered_full[
+        data_indices,
+        :,
+    ]
 
-    D_event_unfiltered = D_event_unfiltered_full[downleg_mask, :]
-    raw_channels_event = raw_channels_full[downleg_mask]
+    raw_channels_event = mapping_table[
+        "Channel"
+    ].to_numpy(dtype=np.float64)
+
+    if len(raw_channels_event) != D_event_unfiltered.shape[0]:
+        raise RuntimeError(
+            "Geometry/data alignment failure: "
+            f"{len(raw_channels_event)} geometry rows versus "
+            f"{D_event_unfiltered.shape[0]} DAS traces."
+        )
 
     # Preview only. Quantitative comparison filters both datasets
     # with this same zero-phase implementation.
@@ -644,13 +970,36 @@ def main() -> None:
         taper_frac=FILTER_TAPER_FRAC,
     )
 
-    print("\nReal DAS downleg crop")
-    print("---------------------")
-    print(f"full real data shape       : {D_event_unfiltered_full.shape}")
-    print(f"first borehole channel     : {first_borehole_channel:.1f}")
-    print(f"turn channel from geometry : {turn_channel:.1f}")
-    print(f"downleg channel range      : {raw_channels_event[0]:.1f} to {raw_channels_event[-1]:.1f}")
-    print(f"downleg data shape         : {D_event.shape}")
+    first_borehole_channel = float(
+        mapping["first_borehole_channel"]
+    )
+    turn_channel = float(
+        mapping["turn_channel"]
+    )
+
+    print("\nReal DAS downleg selection")
+    print("--------------------------")
+    print(
+        "full real data shape       : "
+        f"{D_event_unfiltered_full.shape}"
+    )
+    print(
+        "mapped HDF5-row range      : "
+        f"{data_indices[0]} to {data_indices[-1]}"
+    )
+    print(
+        "mapped raw-channel range   : "
+        f"{raw_channels_event[0]:.1f} to "
+        f"{raw_channels_event[-1]:.1f}"
+    )
+    print(
+        "selected downleg shape     : "
+        f"{D_event.shape}"
+    )
+    print(
+        "geometry/data row match    : "
+        f"{len(mapping_table)} == {D_event.shape[0]}"
+    )
 
     # --------------------------------------------------------------------------
     # 4. Plot real event gather
