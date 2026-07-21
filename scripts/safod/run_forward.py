@@ -22,9 +22,8 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
-
-from scripts.safod.settings import FORWARD_DIR, REAL_EVENT_PACKAGE
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -37,6 +36,12 @@ from src.plotting import plot_safod_model, place_safod_legend
 from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.interpolate import RegularGridInterpolator
 
+from scripts.safod.settings import (
+    DEFAULT_THETA_DEG,
+    REAL_EVENT_PACKAGE,
+    forward_dir_for_theta,
+    forward_run_tag,
+)
 
 # ==============================================================================
 # HELPERS
@@ -780,10 +785,78 @@ def make_wavefield_gif(
 
 
 # ==============================================================================
+# COMMAND-LINE INTERFACE
+# ==============================================================================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the SAFOD initial-model elastic forward simulation for one "
+            "effective 2D double-couple orientation."
+        )
+    )
+
+    parser.add_argument(
+        "--theta-deg",
+        type=float,
+        default=DEFAULT_THETA_DEG,
+        help=(
+            "Effective 2D double-couple orientation in degrees. "
+            "The current parameterisation requires 0 <= theta < 90. "
+            f"Default: {DEFAULT_THETA_DEG:.1f}."
+        ),
+    )
+
+    gif_group = parser.add_mutually_exclusive_group()
+
+    gif_group.add_argument(
+        "--save-gif",
+        dest="save_gif",
+        action="store_true",
+        help=(
+            "Store wavefield snapshots and create the Vz GIF. "
+            "This is the default."
+        ),
+    )
+
+    gif_group.add_argument(
+        "--no-gif",
+        dest="save_gif",
+        action="store_false",
+        help=(
+            "Skip wavefield snapshots and GIF creation. "
+            "Use this only for large parameter sweeps."
+        ),
+    )
+
+    parser.set_defaults(save_gif=True)
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Replace an existing forward NPZ package for the selected angle. "
+            "Without this flag, an existing package aborts the run."
+        ),
+    )
+
+    return parser.parse_args()
+
+
+# ==============================================================================
 # MAIN
 # ==============================================================================
 
 def main() -> None:
+    args = parse_args()
+
+    if not 0.0 <= args.theta_deg < 90.0:
+        raise ValueError(
+            "--theta-deg must satisfy 0 <= theta < 90 for the current "
+            "2D double-couple parameterisation."
+        )
+
+    run_tag = forward_run_tag(args.theta_deg)
     # --------------------------------------------------------------------------
     # Run mode
     # --------------------------------------------------------------------------
@@ -799,7 +872,7 @@ def main() -> None:
         event_cfg = load_real_event_package(real_event_package)
         geom_file = event_cfg["geom_file"]
         # geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
-        out_dir = FORWARD_DIR
+        out_dir = forward_dir_for_theta(args.theta_deg)
     elif source_mode == "deep_saf":
         geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
         out_dir = Path("results/safod_initial_forward")
@@ -807,6 +880,23 @@ def main() -> None:
         raise ValueError(f"Unknown source_mode: {source_mode!r}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    output_package = (
+        out_dir / "outputs_safod_initial_forward.npz"
+    )
+
+    if output_package.exists() and not args.overwrite:
+        raise FileExistsError(
+            f"Forward package already exists: {output_package}\n"
+            "Use --overwrite only when replacement is intentional."
+        )
+
+    print("\nRun identity")
+    print("------------")
+    print(f"run tag       : {run_tag}")
+    print(f"theta         : {args.theta_deg:.1f} deg")
+    print(f"save GIF      : {args.save_gif}")
+    print(f"output dir    : {out_dir}")
 
     # --------------------------------------------------------------------------
     # Numerical settings
@@ -870,11 +960,14 @@ def main() -> None:
     print(f"model bottom               : {z_max_m:.1f} m")
 
     if source_mode == "catalog_event":
-        gauge_length_m = event_cfg["gauge_length_m"]
+        # Use the actual acquisition parameters of the selected real event.
+        gauge_length_m = float(
+            event_cfg["gauge_length_m"]
+        )
 
-        # First QC run: keep receivers on 5 m spacing for speed.
-        # Later we can repeat with real channel spacing 2.041905 m and dx=2 m.
-        channel_spacing_m = 5.0
+        channel_spacing_m = float(
+            event_cfg["real_channel_spacing_m"]
+        )
 
         event_id_for_title = event_cfg["event_id"]
     else:
@@ -992,7 +1085,7 @@ def main() -> None:
         x_src = float(event_cfg["x_src"])
         z_src = float(event_cfg["z_src"])
 
-        source_theta_deg = 35.0
+        source_theta_deg = float(args.theta_deg)
         source_scalar_moment = 1.0e12
         source_f0_hz = 10.0
 
@@ -1031,7 +1124,7 @@ def main() -> None:
         x_src = float(x_fault_src - 80.0 + 0.37 * grid.dx)
         z_src = float(z_src + 0.61 * grid.dz)
 
-        source_theta_deg = 35.0
+        source_theta_deg = float(args.theta_deg)
         source_scalar_moment = 1.0e12
         source_f0_hz = 6.0
 
@@ -1142,7 +1235,10 @@ def main() -> None:
     # --------------------------------------------------------------------------
     # 6. Run forward simulation
     # --------------------------------------------------------------------------
+    snapshot_stride = 300 if args.save_gif else None
+
     print("\nRunning forward simulation...")
+    print(f"snapshot stride: {snapshot_stride}")
     run_result, das_result = run_forward_simulation(
         model=model,
         source=source,
@@ -1152,7 +1248,7 @@ def main() -> None:
         use_ts_sfd=False,
         n_boundary=n_boundary,
         gamma_s=gamma_s,
-        snapshot_stride=300,
+        snapshot_stride=snapshot_stride,
         backend="numba_fused",
         free_surface=free_surface,
     )
@@ -1285,7 +1381,7 @@ def main() -> None:
     # 9. Save arrays
     # --------------------------------------------------------------------------
     np.savez_compressed(
-        out_dir / "outputs_safod_initial_forward.npz",
+        output_package,
 
         t=run_result.t,
         t_sigma=run_result.t_sigma,
@@ -1330,6 +1426,16 @@ def main() -> None:
         source_theta_deg=np.array(source_theta_deg),
         source_f0_hz=np.array(source_f0_hz),
         source_scalar_moment=np.array(source_scalar_moment),
+
+        run_tag=np.array(run_tag),
+        n_boundary=np.array(n_boundary),
+        gamma_s=np.array(gamma_s),
+        free_surface=np.array(free_surface),
+        extra_scientific_x_margin_m=np.array(
+            extra_scientific_x_margin_m
+        ),
+        x_padding_m=np.array(x_padding_m),
+        z_max_m=np.array(z_max_m),
 
         grid_x=grid.x,
         grid_z=grid.z,
