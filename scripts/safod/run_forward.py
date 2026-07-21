@@ -7,8 +7,8 @@
 #
 # Current default mode:
 #   catalog_event:
-#       projected source and corrected down-going SAFOD DAS geometry for
-#       NC75336802. The alternative deep_saf mode remains available for
+#       projected source and event-specific registered down-going SAFOD DAS
+#       geometry. The alternative deep_saf mode remains available for
 #       controlled synthetic QC.
 #
 # Requirements:
@@ -26,11 +26,15 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 from src.safod_builder import build_safod_model, fault_x_at_z
 from src.source import build_dc_source
-from src.receivers import build_das_cable
+from src.receivers import (
+    build_das_cable,
+    build_receivers_from_channel_centres,
+)
 from src.simulator import run_forward_simulation
 from src.plotting import plot_safod_model, place_safod_legend
 from matplotlib.animation import FuncAnimation, PillowWriter
@@ -58,64 +62,186 @@ def normalize_traces(data: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 def load_real_event_package(path: Path) -> dict:
     """
-    Load prepared real-event metadata for synthetic modelling.
+    Load prepared real-event metadata and channel registration.
 
-    The package is created by scripts.safod.prepare_event and contains:
-        - event_x_model_m
-        - event_z_model_m
-        - gauge_length_m
-        - channel_spacing_m
-        - geometry_csv or fallback geometry path
-        - event metadata
+    The package is created by scripts.safod.prepare_event.  For catalogue-event
+    modelling, ``raw_channels`` is the authoritative real-data channel axis and
+    must match one channel-identification column in the registered geometry CSV.
     """
     path = Path(path)
 
     if not path.exists():
-        raise FileNotFoundError(f"Real-event package not found: {path}")
+        raise FileNotFoundError(
+            f"Real-event package not found: {path}"
+        )
 
-    pkg = np.load(path, allow_pickle=True)
+    with np.load(
+        path,
+        allow_pickle=True,
+    ) as pkg:
 
-    def get_scalar(name: str, default=None):
-        if name not in pkg.files:
-            if default is None:
-                raise KeyError(f"Missing {name!r} in real-event package: {path}")
-            return default
+        def get_scalar(name: str, default=None):
+            if name not in pkg.files:
+                if default is None:
+                    raise KeyError(
+                        f"Missing {name!r} in real-event package: {path}"
+                    )
+                return default
 
-        val = pkg[name]
+            value = np.asarray(
+                pkg[name]
+            )
 
-        if val.shape == ():
-            return val.item()
+            if value.shape == ():
+                return value.item()
 
-        if val.size == 1:
-            return val.reshape(-1)[0].item()
+            if value.size == 1:
+                return value.reshape(-1)[0].item()
 
-        return val
+            return value.copy()
 
-    event_dir = path.parent
+        event_dir = path.parent
 
-    if "geometry_csv" in pkg.files:
-        geom_file = str(get_scalar("geometry_csv"))
-    else:
-        geom_file = str(event_dir / "SAFOD_Phase2_projected_from_georef.csv")
+        if "geometry_csv" in pkg.files:
+            geom_file = Path(
+                str(
+                    get_scalar(
+                        "geometry_csv"
+                    )
+                )
+            )
+        else:
+            geom_file = (
+                event_dir
+                / "SAFOD_Phase2_projected_from_georef.csv"
+            )
 
-    cfg = {
-        "package_path": str(path),
-        "event_dir": str(event_dir),
-        "geom_file": geom_file,
+        # Saved paths are normally relative to the project root.  If a package
+        # contains only a filename, also allow resolution relative to event_dir.
+        if not geom_file.exists() and not geom_file.is_absolute():
+            event_relative = (
+                event_dir
+                / geom_file
+            )
+            if event_relative.exists():
+                geom_file = event_relative
 
-        "event_id": str(get_scalar("ev_id", "unknown")),
-        "origin_time": str(get_scalar("ev_origin_time", "unknown")),
-        "magnitude": float(get_scalar("ev_mag", np.nan)),
-        "depth_km": float(get_scalar("ev_depth_km", np.nan)),
+        if "raw_channels" not in pkg.files:
+            raise KeyError(
+                "Prepared real-event package does not contain 'raw_channels'. "
+                "Rerun scripts.safod.prepare_event."
+            )
 
-        "x_src": float(get_scalar("event_x_model_m")),
-        "z_src": float(get_scalar("event_z_model_m")),
-        "event_along_profile_m": float(get_scalar("event_along_profile_m", np.nan)),
-        "event_crossline_m": float(get_scalar("event_crossline_m", np.nan)),
+        real_raw_channels = np.asarray(
+            pkg["raw_channels"],
+            dtype=np.float64,
+        ).copy()
 
-        "gauge_length_m": float(get_scalar("gauge_length_m")),
-        "real_channel_spacing_m": float(get_scalar("channel_spacing_m")),
-    }
+        cfg = {
+            "package_path": str(path),
+            "event_dir": str(event_dir),
+            "geom_file": str(geom_file),
+
+            "event_id": str(
+                get_scalar(
+                    "ev_id",
+                    "unknown",
+                )
+            ),
+            "origin_time": str(
+                get_scalar(
+                    "ev_origin_time",
+                    "unknown",
+                )
+            ),
+            "magnitude": float(
+                get_scalar(
+                    "ev_mag",
+                    np.nan,
+                )
+            ),
+            "depth_km": float(
+                get_scalar(
+                    "ev_depth_km",
+                    np.nan,
+                )
+            ),
+
+            "x_src": float(
+                get_scalar(
+                    "event_x_model_m"
+                )
+            ),
+            "z_src": float(
+                get_scalar(
+                    "event_z_model_m"
+                )
+            ),
+            "event_along_profile_m": float(
+                get_scalar(
+                    "event_along_profile_m",
+                    np.nan,
+                )
+            ),
+            "event_crossline_m": float(
+                get_scalar(
+                    "event_crossline_m",
+                    np.nan,
+                )
+            ),
+
+            "gauge_length_m": float(
+                get_scalar(
+                    "gauge_length_m"
+                )
+            ),
+            "real_channel_spacing_m": float(
+                get_scalar(
+                    "channel_spacing_m"
+                )
+            ),
+            "real_raw_channels": real_raw_channels,
+        }
+
+    if real_raw_channels.ndim != 1:
+        raise ValueError(
+            "real-event raw_channels must be one-dimensional; "
+            f"got shape {real_raw_channels.shape}."
+        )
+
+    if real_raw_channels.size < 2:
+        raise ValueError(
+            "real-event package contains fewer than two raw channels."
+        )
+
+    if not np.all(
+        np.isfinite(real_raw_channels)
+    ):
+        raise ValueError(
+            "real-event raw_channels contains NaN or Inf."
+        )
+
+    if (
+        not np.isfinite(
+            cfg["gauge_length_m"]
+        )
+        or cfg["gauge_length_m"] <= 0.0
+    ):
+        raise ValueError(
+            "Prepared gauge length must be finite and positive; "
+            f"got {cfg['gauge_length_m']}."
+        )
+
+    if (
+        not np.isfinite(
+            cfg["real_channel_spacing_m"]
+        )
+        or cfg["real_channel_spacing_m"] <= 0.0
+    ):
+        raise ValueError(
+            "Prepared channel spacing must be finite and positive; "
+            f"got {cfg['real_channel_spacing_m']}."
+        )
 
     print("\nLoaded real-event package")
     print("-------------------------")
@@ -124,13 +250,397 @@ def load_real_event_package(path: Path) -> dict:
     print(f"origin           : {cfg['origin_time']}")
     print(f"magnitude        : {cfg['magnitude']:.2f}")
     print(f"depth            : {cfg['depth_km']:.2f} km")
-    print(f"source x,z       : {cfg['x_src']:.3f}, {cfg['z_src']:.3f} m")
-    print(f"crossline        : {cfg['event_crossline_m']:.3f} m")
-    print(f"gauge length     : {cfg['gauge_length_m']:.6f} m")
-    print(f"real dCh         : {cfg['real_channel_spacing_m']:.6f} m")
+    print(
+        "source x,z       : "
+        f"{cfg['x_src']:.3f}, {cfg['z_src']:.3f} m"
+    )
+    print(
+        "crossline        : "
+        f"{cfg['event_crossline_m']:.3f} m"
+    )
+    print(
+        "gauge length     : "
+        f"{cfg['gauge_length_m']:.6f} m"
+    )
+    print(
+        "real dCh         : "
+        f"{cfg['real_channel_spacing_m']:.6f} m"
+    )
+    print(
+        "real channels    : "
+        f"{real_raw_channels.size} "
+        f"({real_raw_channels.min():.1f} to "
+        f"{real_raw_channels.max():.1f})"
+    )
     print(f"geometry csv     : {cfg['geom_file']}")
 
     return cfg
+
+
+def load_registered_channel_geometry(
+    *,
+    path: str | Path,
+    x_column: str,
+    z_column: str,
+    expected_raw_channels: np.ndarray,
+) -> dict:
+    """
+    Load exact registered field channel centres from the event geometry CSV.
+
+    The geometry row order must match ``raw_channels`` stored in the prepared
+    real-event package.  A matching channel-identification column is selected
+    explicitly rather than inferred from row position.
+    """
+    path = Path(
+        path
+    )
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Registered geometry CSV not found: {path}"
+        )
+
+    table = pd.read_csv(
+        path
+    )
+
+    for column in (
+        x_column,
+        z_column,
+    ):
+        if column not in table.columns:
+            raise ValueError(
+                f"Missing required geometry column {column!r} in {path}."
+            )
+
+    x = pd.to_numeric(
+        table[x_column],
+        errors="coerce",
+    ).to_numpy(
+        dtype=np.float64
+    )
+
+    z = pd.to_numeric(
+        table[z_column],
+        errors="coerce",
+    ).to_numpy(
+        dtype=np.float64
+    )
+
+    expected = np.asarray(
+        expected_raw_channels,
+        dtype=np.float64,
+    )
+
+    if expected.ndim != 1:
+        raise ValueError(
+            "expected_raw_channels must be one-dimensional."
+        )
+
+    if not (
+        x.size
+        == z.size
+        == expected.size
+    ):
+        raise ValueError(
+            "Registered geometry and prepared real-event data have different "
+            "row counts: "
+            f"geometry={x.size}, real={expected.size}."
+        )
+
+    if not (
+        np.all(
+            np.isfinite(x)
+        )
+        and np.all(
+            np.isfinite(z)
+        )
+    ):
+        raise ValueError(
+            "Registered geometry x/z contains NaN or Inf."
+        )
+
+    candidate_columns = (
+        "Channel",
+        "DataRow",
+        "AcquisitionChannel",
+        "ReferenceChannel",
+    )
+
+    matched_column = None
+    raw_channels = None
+    candidate_diagnostics = []
+
+    for column in candidate_columns:
+        if column not in table.columns:
+            continue
+
+        values = pd.to_numeric(
+            table[column],
+            errors="coerce",
+        ).to_numpy(
+            dtype=np.float64
+        )
+
+        candidate_diagnostics.append(
+            (
+                column,
+                values,
+            )
+        )
+
+        if (
+            values.size == expected.size
+            and np.all(
+                np.isfinite(values)
+            )
+            and np.allclose(
+                values,
+                expected,
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+        ):
+            matched_column = column
+            raw_channels = values
+            break
+
+    if matched_column is None:
+        available = [
+            name
+            for name, _
+            in candidate_diagnostics
+        ]
+
+        raise ValueError(
+            "No channel-identification column in the registered geometry "
+            "matches real_event_package['raw_channels']. "
+            f"Tried columns: {available}. "
+            f"Expected range: {expected.min():.1f} to {expected.max():.1f}."
+        )
+
+    print("\nRegistered field geometry")
+    print("-------------------------")
+    print(f"rows                : {x.size}")
+    print(f"x column            : {x_column}")
+    print(f"z column            : {z_column}")
+    print(f"channel column      : {matched_column}")
+    print(
+        "raw-channel range   : "
+        f"{raw_channels.min():.1f} to {raw_channels.max():.1f}"
+    )
+    print(
+        "x range             : "
+        f"{x.min():.3f} to {x.max():.3f} m"
+    )
+    print(
+        "z range             : "
+        f"{z.min():.3f} to {z.max():.3f} m"
+    )
+
+    return {
+        "table": table,
+        "x": x,
+        "z": z,
+        "raw_channels": raw_channels,
+        "channel_column": matched_column,
+        "row_indices": np.arange(
+            x.size,
+            dtype=np.int64,
+        ),
+    }
+
+
+def compute_gauge_curvature_qc(
+    *,
+    receivers,
+    gauge_length_m: float,
+) -> dict:
+    """
+    Quantify projected tangent rotation across one physical gauge length.
+
+    The current DAS forward operator uses the centre tangent for each gauge.
+    Small endpoint-to-endpoint tangent rotation confirms that this locally
+    straight-gauge approximation is appropriate for the registered cable.
+    """
+    s = np.asarray(
+        receivers.s,
+        dtype=np.float64,
+    )
+    tx = np.asarray(
+        receivers.tx,
+        dtype=np.float64,
+    )
+    tz = np.asarray(
+        receivers.tz,
+        dtype=np.float64,
+    )
+
+    if receivers.nrec < 2:
+        raise ValueError(
+            "At least two receivers are required for curvature QC."
+        )
+
+    ds = float(
+        receivers.channel_spacing
+    )
+
+    if not np.isfinite(ds) or ds <= 0.0:
+        raise ValueError(
+            f"Invalid receiver spacing for curvature QC: {ds}."
+        )
+
+    gauge_length_m = float(
+        gauge_length_m
+    )
+
+    if (
+        not np.isfinite(
+            gauge_length_m
+        )
+        or gauge_length_m <= 0.0
+    ):
+        raise ValueError(
+            "gauge_length_m must be finite and positive."
+        )
+
+    half_gauge = (
+        gauge_length_m / 2.0
+    )
+    tolerance = (
+        1.0e-6 * ds
+    )
+
+    valid = (
+        (s - half_gauge >= s[0] - tolerance)
+        & (s + half_gauge <= s[-1] + tolerance)
+    )
+
+    centre_indices = np.flatnonzero(
+        valid
+    ).astype(
+        np.int64
+    )
+
+    if centre_indices.size == 0:
+        raise ValueError(
+            "No valid gauge centres remain for curvature QC."
+        )
+
+    s_centre = s[
+        centre_indices
+    ]
+    s_left = (
+        s_centre
+        - half_gauge
+    )
+    s_right = (
+        s_centre
+        + half_gauge
+    )
+
+    tx_left = np.interp(
+        s_left,
+        s,
+        tx,
+    )
+    tz_left = np.interp(
+        s_left,
+        s,
+        tz,
+    )
+    tx_right = np.interp(
+        s_right,
+        s,
+        tx,
+    )
+    tz_right = np.interp(
+        s_right,
+        s,
+        tz,
+    )
+
+    norm_left = np.hypot(
+        tx_left,
+        tz_left,
+    )
+    norm_right = np.hypot(
+        tx_right,
+        tz_right,
+    )
+
+    if (
+        np.any(
+            norm_left <= 1.0e-12
+        )
+        or np.any(
+            norm_right <= 1.0e-12
+        )
+    ):
+        raise ValueError(
+            "Interpolated gauge-end tangent is degenerate."
+        )
+
+    tx_left /= norm_left
+    tz_left /= norm_left
+    tx_right /= norm_right
+    tz_right /= norm_right
+
+    dot = np.clip(
+        tx_left * tx_right
+        + tz_left * tz_right,
+        -1.0,
+        1.0,
+    )
+
+    rotation_deg = np.degrees(
+        np.arccos(
+            dot
+        )
+    )
+
+    result = {
+        "channel_indices": centre_indices,
+        "rotation_deg": rotation_deg,
+        "median_deg": float(
+            np.median(
+                rotation_deg
+            )
+        ),
+        "p95_deg": float(
+            np.percentile(
+                rotation_deg,
+                95.0,
+            )
+        ),
+        "max_deg": float(
+            np.max(
+                rotation_deg
+            )
+        ),
+    }
+
+    print("\nGauge-curvature QC")
+    print("------------------")
+    print(
+        "valid gauge centres : "
+        f"{centre_indices.size}"
+    )
+    print(
+        "median rotation     : "
+        f"{result['median_deg']:.6f} deg"
+    )
+    print(
+        "95th percentile     : "
+        f"{result['p95_deg']:.6f} deg"
+    )
+    print(
+        "maximum rotation    : "
+        f"{result['max_deg']:.6f} deg"
+    )
+
+    return result
+
 
 def compute_straight_ray_arrivals(
     *,
@@ -294,9 +804,12 @@ def trim_cable_for_solver_domain(
     n_boundary: int,
     half_order: int,
     free_surface: bool,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Keep receiver cable points inside the solver-valid domain.
+
+    Returns the retained x/z arrays and the Boolean mask into the original
+    registered geometry so channel identity is preserved exactly.
 
     For free_surface=True:
       - top sponge is disabled, so shallow receivers are allowed;
@@ -351,7 +864,34 @@ def trim_cable_for_solver_domain(
     print(f"kept x range         : {x_cable[keep].min():.1f} to {x_cable[keep].max():.1f} m")
     print(f"kept z range         : {z_cable[keep].min():.1f} to {z_cable[keep].max():.1f} m")
 
-    return x_cable[keep], z_cable[keep]
+    kept_indices = np.flatnonzero(
+        keep
+    )
+
+    if (
+        kept_indices.size > 1
+        and not np.all(
+            np.diff(
+                kept_indices
+            )
+            == 1
+        )
+    ):
+        raise ValueError(
+            "Solver-domain trimming produced a non-contiguous receiver block. "
+            "A finite-gauge DAS operator must not bridge gaps in the cable."
+        )
+
+    print(
+        "kept input rows       : "
+        f"{kept_indices[0]} to {kept_indices[-1]}"
+    )
+
+    return (
+        x_cable[keep],
+        z_cable[keep],
+        keep,
+    )
 
 
 def check_source_inside_solver_domain(
@@ -1044,29 +1584,226 @@ def main() -> None:
     # --------------------------------------------------------------------------
     # 2. Trim cable and build DAS receivers
     # --------------------------------------------------------------------------
-    x_cable_use, z_cable_use = trim_cable_for_solver_domain(
-        grid=grid,
-        x_cable=x_cable_raw,
-        z_cable=z_cable_raw,
-        n_boundary=n_boundary,
-        half_order=half_order,
-        free_surface=free_surface,
+    x_cable_use, z_cable_use, cable_keep_mask = (
+        trim_cable_for_solver_domain(
+            grid=grid,
+            x_cable=x_cable_raw,
+            z_cable=z_cable_raw,
+            n_boundary=n_boundary,
+            half_order=half_order,
+            free_surface=free_surface,
+        )
     )
 
-    receivers = build_das_cable(
-        grid=grid,
-        waypoints_x=x_cable_use.tolist(),
-        waypoints_z=z_cable_use.tolist(),
-        channel_spacing_m=channel_spacing_m,
-        n_pml=0,
+    if source_mode == "catalog_event":
+        registered_geometry = load_registered_channel_geometry(
+            path=geom_file,
+            x_column=x_column,
+            z_column=z_column,
+            expected_raw_channels=event_cfg["real_raw_channels"],
+        )
+
+        registered_x = np.asarray(
+            registered_geometry["x"],
+            dtype=np.float64,
+        )
+        registered_z = np.asarray(
+            registered_geometry["z"],
+            dtype=np.float64,
+        )
+
+        if (
+            registered_x.shape
+            != np.asarray(
+                x_cable_raw
+            ).shape
+            or registered_z.shape
+            != np.asarray(
+                z_cable_raw
+            ).shape
+        ):
+            raise ValueError(
+                "build_safod_model returned a cable with a different row count "
+                "from the registered geometry CSV."
+            )
+
+        builder_mismatch = np.hypot(
+            np.asarray(
+                x_cable_raw,
+                dtype=np.float64,
+            )
+            - registered_x,
+            np.asarray(
+                z_cable_raw,
+                dtype=np.float64,
+            )
+            - registered_z,
+        )
+
+        builder_mismatch_max_m = float(
+            np.max(
+                builder_mismatch
+            )
+        )
+
+        if builder_mismatch_max_m > 1.0e-6:
+            raise ValueError(
+                "build_safod_model cable coordinates do not reproduce the "
+                "registered geometry CSV exactly. "
+                f"Maximum mismatch={builder_mismatch_max_m:.6e} m."
+            )
+
+        receiver_raw_channels = np.asarray(
+            registered_geometry[
+                "raw_channels"
+            ][
+                cable_keep_mask
+            ],
+            dtype=np.float64,
+        )
+
+        receiver_geometry_row_indices = np.asarray(
+            registered_geometry[
+                "row_indices"
+            ][
+                cable_keep_mask
+            ],
+            dtype=np.int64,
+        )
+
+        # The DAS operator is parameterised by the interrogator's physical
+        # uniform channel spacing.  x/z remain the exact registered channel
+        # centres; only the cable-coordinate origin is reset after trimming.
+        receiver_s = (
+            np.arange(
+                x_cable_use.size,
+                dtype=np.float64,
+            )
+            * channel_spacing_m
+        )
+
+        receivers = build_receivers_from_channel_centres(
+            x=x_cable_use,
+            z=z_cable_use,
+            s=receiver_s,
+            grid=grid,
+            n_pml=0,
+        )
+
+        centre_mismatch = np.hypot(
+            receivers.x
+            - x_cable_use,
+            receivers.z
+            - z_cable_use,
+        )
+
+        receiver_centre_mismatch_max_m = float(
+            np.max(
+                centre_mismatch
+            )
+        )
+
+        if receiver_centre_mismatch_max_m > 1.0e-12:
+            raise RuntimeError(
+                "Exact-channel-centre constructor moved one or more registered "
+                "receivers. "
+                f"Maximum mismatch={receiver_centre_mismatch_max_m:.6e} m."
+            )
+
+        geometry_channel_column = str(
+            registered_geometry[
+                "channel_column"
+            ]
+        )
+        receiver_geometry_mode = (
+            "exact_registered_channel_centres"
+        )
+
+    else:
+        # Controlled synthetic geometry remains generated from a continuous
+        # waypoint polyline.
+        receivers = build_das_cable(
+            grid=grid,
+            waypoints_x=x_cable_use.tolist(),
+            waypoints_z=z_cable_use.tolist(),
+            channel_spacing_m=channel_spacing_m,
+            n_pml=0,
+        )
+
+        receiver_raw_channels = np.arange(
+            receivers.nrec,
+            dtype=np.float64,
+        )
+
+        receiver_geometry_row_indices = np.arange(
+            receivers.nrec,
+            dtype=np.int64,
+        )
+
+        receiver_centre_mismatch_max_m = np.nan
+        builder_mismatch_max_m = np.nan
+        geometry_channel_column = ""
+        receiver_geometry_mode = (
+            "uniform_waypoint_resampling"
+        )
+
+    if not np.isclose(
+        receivers.channel_spacing,
+        channel_spacing_m,
+        rtol=0.0,
+        atol=1.0e-9,
+    ):
+        raise RuntimeError(
+            "Constructed receiver spacing does not match the selected "
+            "acquisition spacing: "
+            f"receivers={receivers.channel_spacing:.12f} m, "
+            f"requested={channel_spacing_m:.12f} m."
+        )
+
+    gauge_curvature_qc = compute_gauge_curvature_qc(
+        receivers=receivers,
+        gauge_length_m=gauge_length_m,
     )
 
     print("\nReceivers")
     print("---------")
-    print(f"receivers  : {receivers.nrec} DAS channels")
-    print(f"cable s    : {receivers.s[0]:.1f} to {receivers.s[-1]:.1f} m")
-    print(f"receiver x : {receivers.x.min():.1f} to {receivers.x.max():.1f} m")
-    print(f"receiver z : {receivers.z.min():.1f} to {receivers.z.max():.1f} m")
+    print(
+        f"geometry mode       : "
+        f"{receiver_geometry_mode}"
+    )
+    print(
+        f"receivers           : "
+        f"{receivers.nrec} channel centres"
+    )
+    print(
+        f"receiver spacing    : "
+        f"{receivers.channel_spacing:.6f} m"
+    )
+    print(
+        f"gauge / spacing     : "
+        f"{gauge_length_m / receivers.channel_spacing:.6f}"
+    )
+    print(
+        f"cable s             : "
+        f"{receivers.s[0]:.3f} to {receivers.s[-1]:.3f} m"
+    )
+    print(
+        f"receiver x          : "
+        f"{receivers.x.min():.3f} to {receivers.x.max():.3f} m"
+    )
+    print(
+        f"receiver z          : "
+        f"{receivers.z.min():.3f} to {receivers.z.max():.3f} m"
+    )
+    print(
+        f"raw-channel range   : "
+        f"{receiver_raw_channels.min():.1f} to "
+        f"{receiver_raw_channels.max():.1f}"
+    )
+    print(
+        "centre mismatch max : "
+        f"{receiver_centre_mismatch_max_m:.6e} m"
+    )
 
     # --------------------------------------------------------------------------
     # 3. Source
@@ -1300,6 +2037,29 @@ def main() -> None:
     print(f"gauge_samples  : {das_result.gauge_samples:.6f}")
     print(f"nchan_out      : {das_result.nchan_out}")
 
+    if not np.array_equal(
+        das_result.channel_indices,
+        gauge_curvature_qc["channel_indices"],
+    ):
+        raise RuntimeError(
+            "Gauge-curvature QC and DAS operator selected different gauge "
+            "centres. Their physical gauge-validity logic must remain identical."
+        )
+
+    das_raw_channels = receiver_raw_channels[
+        das_result.channel_indices
+    ]
+
+    das_geometry_row_indices = receiver_geometry_row_indices[
+        das_result.channel_indices
+    ]
+
+    print(
+        "DAS raw channels: "
+        f"{das_raw_channels.min():.1f} to "
+        f"{das_raw_channels.max():.1f}"
+    )
+
     # --------------------------------------------------------------------------
     # 7b. DAS-channel subset of the precomputed first-arrival curves
     # --------------------------------------------------------------------------
@@ -1397,6 +2157,50 @@ def main() -> None:
         receiver_x=receivers.x,
         receiver_z=receivers.z,
         receiver_s=receivers.s,
+        receiver_raw_channels=receiver_raw_channels,
+        das_raw_channels=das_raw_channels,
+        receiver_geometry_row_indices=receiver_geometry_row_indices,
+        das_geometry_row_indices=das_geometry_row_indices,
+        receiver_channel_spacing_m=np.array(
+            receivers.channel_spacing
+        ),
+        receiver_geometry_mode=np.array(
+            receiver_geometry_mode
+        ),
+        receiver_s_definition=np.array(
+            "uniform acquisition coordinate from event-specific dCh"
+            if source_mode == "catalog_event"
+            else "uniform synthetic waypoint-resampled coordinate"
+        ),
+        geometry_channel_column=np.array(
+            geometry_channel_column
+        ),
+        receiver_centre_mismatch_max_m=np.array(
+            receiver_centre_mismatch_max_m
+        ),
+        builder_geometry_mismatch_max_m=np.array(
+            builder_mismatch_max_m
+        ),
+        gauge_tangent_rotation_deg=(
+            gauge_curvature_qc[
+                "rotation_deg"
+            ]
+        ),
+        gauge_tangent_rotation_median_deg=np.array(
+            gauge_curvature_qc[
+                "median_deg"
+            ]
+        ),
+        gauge_tangent_rotation_p95_deg=np.array(
+            gauge_curvature_qc[
+                "p95_deg"
+            ]
+        ),
+        gauge_tangent_rotation_max_deg=np.array(
+            gauge_curvature_qc[
+                "max_deg"
+            ]
+        ),
 
         arrival_s_receiver=arrivals_receiver["s"],
         arrival_p_receiver=arrivals_receiver["P"],
