@@ -18,21 +18,29 @@
 #   Rotating by theta_deg rotates the fault orientation in the x-z plane.
 #
 # Source time function convention
-#   stf.values[n] is a dimensionless source-time factor sampled on the
-#   integer stress time grid.
+#   The solver updates stress as
 #
-#   In the leapfrog solver it is injected into the updated stress field at
-#   t_sigma[n+1] = (n+1)*dt.
+#       sigma^(n+1) = sigma^n + dt * (...) + dt/A * S_M(t_(n+1/2)),
 #
-#   Important physical note:
-#   The current Ricker-based source time functions are band-limited modelling
-#   wavelets. They are useful for controlled synthetic experiments and
-#   validation. For absolute earthquake-amplitude modelling and FWI, a
-#   separate unit-area moment-rate source time function should be added:
+#   where A = dx*dz and S_M is a moment-tensor stress-rate source.
 #
-#       sum(moment_rate_stf) * dt = 1
+#   For a physical moment history
 #
-#   so that M0 * moment_rate_stf(t) has physical moment-rate units.
+#       M_phys(t) = M0 * W(t),
+#
+#   the equivalent stress glut is -M_phys(t) delta(x), so the first-order
+#   stress equation requires
+#
+#       S_M(t) = -dM_phys/dt.
+#
+#   source_time_mode="ricker_moment" implements exactly this convention using
+#   -dW/dt sampled at the stress-update midpoint t=(n+1/2)dt. In that mode,
+#   particle-velocity output is directly comparable with analytical velocity
+#   for the Ricker moment history W(t).
+#
+#   The legacy Ricker modes are retained for reproducibility. They are generic
+#   stress-rate modelling wavelets and must not be described as a physical
+#   Ricker moment history.
 #
 # Source spreading
 #   spreading="nearest" (default)
@@ -75,6 +83,13 @@ from src.source_spreading import (
 
 
 _VALID_SPREADING = frozenset({"nearest", "bilinear"})
+_VALID_SOURCE_TIME_MODES = frozenset(
+    {
+        "legacy_ricker",
+        "legacy_ricker_derivative",
+        "ricker_moment",
+    }
+)
 
 
 # ==============================================================================
@@ -244,42 +259,95 @@ def build_isotropic_source_tensor_2d(scalar_moment: float) -> MomentTensor2D:
 @dataclass(frozen=True)
 class SourceTimeFunction:
     """
-    Discrete source time function sampled on the solver integer time grid.
+    Discrete stress-source-rate factor consumed by the leapfrog solver.
 
-    values[n] is a unit-amplitude source-time factor at integer index n.
-    In the current solver convention, values[n] is injected into the updated
-    stress field at t_sigma[n+1] = (n+1)*dt.
+    values[n] is multiplied by a moment-tensor component and by dt/(dx*dz)
+    before being added to stress during update n.
 
-    Note
-    ----
-    The current Ricker functions are modelling wavelets. They are not
-    normalised as unit-area physical moment-rate functions.
+    time_offset_steps specifies the sampling location:
+
+        0.0 -> t = n*dt                 (legacy modes)
+        0.5 -> t = (n+1/2)*dt           (midpoint stress-rate sampling)
+
+    For source_time_mode="ricker_moment", values is -dW/dt at the midpoint,
+    where W is the physical Ricker moment history.
     """
+
     values: np.ndarray
     dt: float
     t0: float
     kind: str
+    time_offset_steps: float = 0.0
+    physical_quantity: str = "stress_source_rate_factor"
 
     def __post_init__(self) -> None:
-        values = np.array(self.values, dtype=np.float64, copy=True)
+        values = np.array(
+            self.values,
+            dtype=np.float64,
+            copy=True,
+        )
 
         if values.ndim != 1:
-            raise ValueError(f"values must be 1D, got shape {values.shape}.")
+            raise ValueError(
+                f"values must be 1D, got shape {values.shape}."
+            )
         if values.size < 2:
-            raise ValueError("values must contain at least 2 samples.")
-        if self.dt <= 0.0:
-            raise ValueError(f"dt must be positive, got {self.dt}.")
-        if self.t0 < 0.0:
-            raise ValueError(f"t0 must be non-negative, got {self.t0}.")
+            raise ValueError(
+                "values must contain at least 2 samples."
+            )
+        if not np.isfinite(self.dt) or self.dt <= 0.0:
+            raise ValueError(
+                f"dt must be finite and positive, got {self.dt}."
+            )
+        if not np.isfinite(self.t0) or self.t0 < 0.0:
+            raise ValueError(
+                f"t0 must be finite and non-negative, got {self.t0}."
+            )
+        if (
+            not np.isfinite(self.time_offset_steps)
+            or not 0.0 <= self.time_offset_steps <= 1.0
+        ):
+            raise ValueError(
+                "time_offset_steps must be finite and in [0, 1]; "
+                f"got {self.time_offset_steps}."
+            )
         if not np.all(np.isfinite(values)):
-            raise ValueError("source time function values must be finite.")
+            raise ValueError(
+                "source time function values must be finite."
+            )
 
         values.flags.writeable = False
 
-        object.__setattr__(self, "values", values)
-        object.__setattr__(self, "dt", float(self.dt))
-        object.__setattr__(self, "t0", float(self.t0))
-        object.__setattr__(self, "kind", str(self.kind))
+        object.__setattr__(
+            self,
+            "values",
+            values,
+        )
+        object.__setattr__(
+            self,
+            "dt",
+            float(self.dt),
+        )
+        object.__setattr__(
+            self,
+            "t0",
+            float(self.t0),
+        )
+        object.__setattr__(
+            self,
+            "kind",
+            str(self.kind),
+        )
+        object.__setattr__(
+            self,
+            "time_offset_steps",
+            float(self.time_offset_steps),
+        )
+        object.__setattr__(
+            self,
+            "physical_quantity",
+            str(self.physical_quantity),
+        )
 
     @property
     def nt(self) -> int:
@@ -287,26 +355,99 @@ class SourceTimeFunction:
 
     @property
     def t(self) -> np.ndarray:
-        """
-        Integer time axis: t[n] = n*dt.
-
-        Note: values[n] is injected at t_sigma[n+1] = (n+1)*dt,
-        not at t[n].
-        """
-        return np.arange(self.nt, dtype=np.float64) * self.dt
+        """Actual sampling times of values[n]."""
+        return (
+            np.arange(
+                self.nt,
+                dtype=np.float64,
+            )
+            + self.time_offset_steps
+        ) * self.dt
 
     def peak_amplitude(self) -> float:
-        return float(np.max(np.abs(self.values)))
+        return float(
+            np.max(
+                np.abs(self.values)
+            )
+        )
 
     def summary(self) -> str:
         return (
             f"SourceTimeFunction(kind={self.kind}, nt={self.nt}, "
             f"dt={self.dt:.3e}, t0={self.t0:.3e}, "
+            f"offset={self.time_offset_steps:.1f}dt, "
             f"peak={self.peak_amplitude():.3e})"
         )
 
     def __repr__(self) -> str:
         return self.summary()
+
+
+def _validate_wavelet_inputs(
+    *,
+    nt: int,
+    dt: float,
+    f0_hz: float,
+) -> None:
+    if nt < 2:
+        raise ValueError(
+            f"nt must be >= 2, got {nt}."
+        )
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError(
+            f"dt must be finite and positive, got {dt}."
+        )
+    if not np.isfinite(f0_hz) or f0_hz <= 0.0:
+        raise ValueError(
+            f"f0_hz must be finite and positive, got {f0_hz}."
+        )
+
+
+def _ricker_and_derivative(
+    time_s: np.ndarray,
+    *,
+    f0_hz: float,
+    t0_s: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Return the unit Ricker moment history W and its exact derivative dW/dt.
+    """
+    time_s = np.asarray(
+        time_s,
+        dtype=np.float64,
+    )
+
+    x = (
+        np.pi
+        * float(f0_hz)
+        * (
+            time_s
+            - float(t0_s)
+        )
+    )
+
+    exponential = np.exp(
+        -x**2
+    )
+
+    wavelet = (
+        1.0
+        - 2.0 * x**2
+    ) * exponential
+
+    derivative = (
+        2.0
+        * np.pi
+        * float(f0_hz)
+        * x
+        * (
+            2.0 * x**2
+            - 3.0
+        )
+        * exponential
+    )
+
+    return wavelet, derivative
 
 
 def ricker_wavelet(
@@ -316,30 +457,39 @@ def ricker_wavelet(
     f0_hz: float,
 ) -> SourceTimeFunction:
     """
-    Ricker wavelet with unit peak scale.
+    Legacy Ricker stress-rate modelling wavelet sampled at t=n*dt.
 
-    W(t) = (1 - 2*pi^2*f0^2*(t-t0)^2) exp(-pi^2*f0^2*(t-t0)^2)
-
-    where:
-
-        t0 = 1.2 / f0
+    This mode is retained for reproducibility. It is not the stress-rate source
+    corresponding to a physical Ricker moment history.
     """
-    if nt < 2:
-        raise ValueError(f"nt must be >= 2, got {nt}.")
-    if dt <= 0.0:
-        raise ValueError(f"dt must be positive, got {dt}.")
-    if f0_hz <= 0.0:
-        raise ValueError(f"f0_hz must be positive, got {f0_hz}.")
+    _validate_wavelet_inputs(
+        nt=nt,
+        dt=dt,
+        f0_hz=f0_hz,
+    )
 
-    t0 = 1.2 / f0_hz
-    t = np.arange(nt, dtype=np.float64) * dt
-    arg = (np.pi * f0_hz * (t - t0)) ** 2
+    t0 = 1.2 / float(f0_hz)
+    time_s = (
+        np.arange(
+            nt,
+            dtype=np.float64,
+        )
+        * float(dt)
+    )
+
+    wavelet, _ = _ricker_and_derivative(
+        time_s,
+        f0_hz=f0_hz,
+        t0_s=t0,
+    )
 
     return SourceTimeFunction(
-        values=(1.0 - 2.0 * arg) * np.exp(-arg),
+        values=wavelet,
         dt=dt,
         t0=t0,
-        kind="ricker",
+        kind="legacy_ricker_stress_rate",
+        time_offset_steps=0.0,
+        physical_quantity="generic_stress_source_rate_factor",
     )
 
 
@@ -350,30 +500,93 @@ def ricker_derivative_wavelet(
     f0_hz: float,
 ) -> SourceTimeFunction:
     """
-    First time derivative of the Ricker wavelet.
+    Legacy positive derivative dW/dt sampled at t=n*dt.
 
-    dW/dt = 2*pi*f0*x*(2*x^2 - 3)*exp(-x^2)
-
-    where:
-
-        x = pi*f0*(t - t0)
+    Retained only for backward compatibility. For a physical positive moment
+    history M0*W(t), use ricker_moment_rate_source(), which has the required
+    negative sign and midpoint sampling.
     """
-    if nt < 2:
-        raise ValueError(f"nt must be >= 2, got {nt}.")
-    if dt <= 0.0:
-        raise ValueError(f"dt must be positive, got {dt}.")
-    if f0_hz <= 0.0:
-        raise ValueError(f"f0_hz must be positive, got {f0_hz}.")
+    _validate_wavelet_inputs(
+        nt=nt,
+        dt=dt,
+        f0_hz=f0_hz,
+    )
 
-    t0 = 1.2 / f0_hz
-    t = np.arange(nt, dtype=np.float64) * dt
-    x = np.pi * f0_hz * (t - t0)
+    t0 = 1.2 / float(f0_hz)
+    time_s = (
+        np.arange(
+            nt,
+            dtype=np.float64,
+        )
+        * float(dt)
+    )
+
+    _, derivative = _ricker_and_derivative(
+        time_s,
+        f0_hz=f0_hz,
+        t0_s=t0,
+    )
 
     return SourceTimeFunction(
-        values=(2.0 * np.pi * f0_hz * x * (2.0 * x**2 - 3.0)) * np.exp(-x**2),
+        values=derivative,
         dt=dt,
         t0=t0,
-        kind="ricker_derivative",
+        kind="legacy_ricker_derivative_stress_rate",
+        time_offset_steps=0.0,
+        physical_quantity="generic_stress_source_rate_factor",
+    )
+
+
+def ricker_moment_rate_source(
+    *,
+    nt: int,
+    dt: float,
+    f0_hz: float,
+) -> SourceTimeFunction:
+    r"""
+    Physical stress-rate source for a positive Ricker moment history.
+
+    Let the physical moment tensor history be
+
+        M_phys(t) = M_tensor * W(t).
+
+    With the project momentum convention rho dv_i/dt = d_j sigma_ij, a moment
+    tensor is represented by the stress glut -M_phys(t) delta(x). Therefore
+    the stress-rate equation receives
+
+        S_ij(t) = -M_tensor_ij * dW/dt.
+
+    The stress update integrates this rate over [t_n, t_(n+1)], so the source
+    is sampled at the midpoint t_(n+1/2).
+    """
+    _validate_wavelet_inputs(
+        nt=nt,
+        dt=dt,
+        f0_hz=f0_hz,
+    )
+
+    t0 = 1.2 / float(f0_hz)
+    time_s = (
+        np.arange(
+            nt,
+            dtype=np.float64,
+        )
+        + 0.5
+    ) * float(dt)
+
+    _, derivative = _ricker_and_derivative(
+        time_s,
+        f0_hz=f0_hz,
+        t0_s=t0,
+    )
+
+    return SourceTimeFunction(
+        values=-derivative,
+        dt=dt,
+        t0=t0,
+        kind="ricker_physical_moment_rate",
+        time_offset_steps=0.5,
+        physical_quantity="-d(moment_history_factor)/dt",
     )
 
 
@@ -383,22 +596,77 @@ def build_source_time_function(
     dt: float,
     f0_hz: float,
     derivative_order: int = 0,
+    source_time_mode: str | None = None,
 ) -> SourceTimeFunction:
     """
-    Build a source time function.
+    Build the stress-rate source consumed by the solver.
 
-    derivative_order=0 : Ricker wavelet
-    derivative_order=1 : first derivative of Ricker wavelet
+    Recommended physical mode
+    -------------------------
+    source_time_mode="ricker_moment"
+        Uses -dW/dt at t=(n+1/2)dt. The supplied tensor is then interpreted as
+        the peak tensor of the physical Ricker moment history M(t)=M_tensor*W(t).
+
+    Legacy compatibility
+    --------------------
+    source_time_mode=None maps:
+        derivative_order=0 -> "legacy_ricker"
+        derivative_order=1 -> "legacy_ricker_derivative"
+
+    Explicit source_time_mode takes precedence only when derivative_order is 0.
+    Passing a nonzero derivative_order together with source_time_mode is
+    rejected as ambiguous.
     """
-    if derivative_order == 0:
-        return ricker_wavelet(nt=nt, dt=dt, f0_hz=f0_hz)
+    if source_time_mode is None:
+        if derivative_order == 0:
+            mode = "legacy_ricker"
+        elif derivative_order == 1:
+            mode = "legacy_ricker_derivative"
+        else:
+            raise ValueError(
+                f"Unsupported derivative_order={derivative_order}. "
+                "Only 0 and 1 are supported."
+            )
+    else:
+        mode = str(
+            source_time_mode
+        ).lower()
 
-    if derivative_order == 1:
-        return ricker_derivative_wavelet(nt=nt, dt=dt, f0_hz=f0_hz)
+        if derivative_order != 0:
+            raise ValueError(
+                "Do not combine source_time_mode with nonzero "
+                "derivative_order."
+            )
 
-    raise ValueError(
-        f"Unsupported derivative_order={derivative_order}. "
-        "Only 0 and 1 are supported."
+        if mode not in _VALID_SOURCE_TIME_MODES:
+            raise ValueError(
+                "source_time_mode must be one of "
+                f"{sorted(_VALID_SOURCE_TIME_MODES)}, got {source_time_mode!r}."
+            )
+
+    if mode == "legacy_ricker":
+        return ricker_wavelet(
+            nt=nt,
+            dt=dt,
+            f0_hz=f0_hz,
+        )
+
+    if mode == "legacy_ricker_derivative":
+        return ricker_derivative_wavelet(
+            nt=nt,
+            dt=dt,
+            f0_hz=f0_hz,
+        )
+
+    if mode == "ricker_moment":
+        return ricker_moment_rate_source(
+            nt=nt,
+            dt=dt,
+            f0_hz=f0_hz,
+        )
+
+    raise RuntimeError(
+        f"Unhandled source_time_mode={mode!r}."
     )
 
 
@@ -465,6 +733,7 @@ class EmbeddedSource2D:
             f"  spreading          : {self.spreading}",
             f"  scalar moment M0   : {self.scalar_moment:.6e} N·m",
             f"  STF                : {self.stf.summary()}",
+            f"  STF quantity       : {self.stf.physical_quantity}",
             f"  tensor trace       : {self.m2d.trace():.6e}",
             f"  tensor ||M||_F     : {self.m2d.frobenius_norm():.6e}",
         ]
@@ -514,6 +783,7 @@ def build_source_2d(
     dt: float,
     f0_hz: float,
     derivative_order: int = 0,
+    source_time_mode: str | None = None,
     spreading: str = "nearest",
     label: str = "2D source",
 ) -> EmbeddedSource2D:
@@ -541,8 +811,11 @@ def build_source_2d(
         Dominant frequency of the source time function [Hz].
 
     derivative_order :
-        0 -> Ricker wavelet.
-        1 -> first derivative of Ricker wavelet.
+        Legacy compatibility selector. Prefer source_time_mode for new work.
+
+    source_time_mode :
+        "ricker_moment" for a physical Ricker moment history.
+        Legacy modes remain available for reproducibility.
 
     spreading :
         "nearest"  -> backward-compatible nearest-node injection.
@@ -575,6 +848,7 @@ def build_source_2d(
         dt=dt,
         f0_hz=f0_hz,
         derivative_order=derivative_order,
+        source_time_mode=source_time_mode,
     )
 
     if spreading_norm == "nearest":
@@ -630,6 +904,7 @@ def build_dc_source(
     dt: float,
     f0_hz: float,
     derivative_order: int = 0,
+    source_time_mode: str | None = None,
     spreading: str = "nearest",
 ) -> EmbeddedSource2D:
     """
@@ -663,6 +938,7 @@ def build_dc_source(
         dt=dt,
         f0_hz=f0_hz,
         derivative_order=derivative_order,
+        source_time_mode=source_time_mode,
         spreading=spreading_norm,
         label=(
             f"2D double-couple "
@@ -682,6 +958,7 @@ def build_isotropic_source(
     dt: float,
     f0_hz: float,
     derivative_order: int = 0,
+    source_time_mode: str | None = None,
     spreading: str = "nearest",
 ) -> EmbeddedSource2D:
     """
@@ -709,6 +986,7 @@ def build_isotropic_source(
         dt=dt,
         f0_hz=f0_hz,
         derivative_order=derivative_order,
+        source_time_mode=source_time_mode,
         spreading=spreading_norm,
         label=(
             f"2D isotropic "
@@ -779,6 +1057,29 @@ def _self_test() -> None:
 
     assert stf_der.nt == grid.nt
     assert stf_der.peak_amplitude() > 0.0
+
+    stf_physical = build_source_time_function(
+        nt=grid.nt,
+        dt=grid.dt,
+        f0_hz=8.0,
+        source_time_mode="ricker_moment",
+    )
+
+    assert stf_physical.nt == grid.nt
+    assert np.isclose(stf_physical.time_offset_steps, 0.5)
+    assert stf_physical.kind == "ricker_physical_moment_rate"
+
+    _, expected_derivative = _ricker_and_derivative(
+        stf_physical.t,
+        f0_hz=8.0,
+        t0_s=stf_physical.t0,
+    )
+    assert np.allclose(
+        stf_physical.values,
+        -expected_derivative,
+        rtol=0.0,
+        atol=1.0e-12,
+    )
 
     print("SourceTimeFunction: OK")
 
