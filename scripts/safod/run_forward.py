@@ -1146,18 +1146,20 @@ def make_wavefield_gif(
     source,
     out_path: Path,
     title: str,
+    plot_x_min_m: float,
+    plot_x_max_m: float,
+    plot_z_max_m: float,
     fps: int = 6,
     max_frames: int = 80,
     percentile_clip: float = 99.5,
 ) -> None:
     """
-    Make GIF of Vz wavefield propagation.
+    Make a Vz wavefield GIF over the scientific model domain only.
 
-    This is mainly for QC:
-    - radiation pattern of the double-couple moment tensor source
-    - free-surface behaviour
-    - side/bottom sponge absorption
-    - scattering / bending near the SAF low-velocity zone
+    The solver snapshots contain the complete computational grid, including
+    side and bottom absorbing sponge cells. Those cells are intentionally
+    excluded from both the displayed image and the colour-scale calculation.
+    Boundary-performance QC belongs in a separate validation figure.
     """
     snapshots_vz = np.asarray(snapshots_vz, dtype=np.float64)
     snapshot_times = np.asarray(snapshot_times, dtype=np.float64)
@@ -1167,13 +1169,10 @@ def make_wavefield_gif(
             f"snapshots_vz must be 3D, got shape {snapshots_vz.shape}."
         )
 
-    # Infer number of frames.
     if snapshots_vz.shape[0] == snapshot_times.size:
         nframes_total = snapshots_vz.shape[0]
-        frame_axis = 0
     elif snapshots_vz.shape[-1] == snapshot_times.size:
         nframes_total = snapshots_vz.shape[-1]
-        frame_axis = -1
     else:
         raise ValueError(
             "snapshot_times length does not match first or last snapshot axis: "
@@ -1184,13 +1183,56 @@ def make_wavefield_gif(
     if nframes_total < 1:
         raise ValueError("No snapshots available for GIF.")
 
-    # Limit GIF length if many snapshots are present.
-    if nframes_total > max_frames:
-        frame_ids = np.linspace(0, nframes_total - 1, max_frames).astype(int)
-    else:
-        frame_ids = np.arange(nframes_total, dtype=int)
+    if not (
+        np.isfinite(plot_x_min_m)
+        and np.isfinite(plot_x_max_m)
+        and np.isfinite(plot_z_max_m)
+    ):
+        raise ValueError("GIF plot limits must be finite.")
 
-    # Robust symmetric colour scale from all selected frames.
+    if plot_x_min_m >= plot_x_max_m:
+        raise ValueError(
+            f"Invalid GIF x limits: {plot_x_min_m} >= {plot_x_max_m}."
+        )
+
+    x_grid = np.asarray(grid.x, dtype=np.float64)
+    z_grid = np.asarray(grid.z, dtype=np.float64)
+
+    x_keep = (
+        (x_grid >= float(plot_x_min_m) - 0.5 * grid.dx)
+        & (x_grid <= float(plot_x_max_m) + 0.5 * grid.dx)
+    )
+    z_keep = (
+        (z_grid >= float(z_grid[0]) - 0.5 * grid.dz)
+        & (z_grid <= float(plot_z_max_m) + 0.5 * grid.dz)
+    )
+
+    ix = np.flatnonzero(x_keep)
+    iz = np.flatnonzero(z_keep)
+
+    if ix.size < 2 or iz.size < 2:
+        raise ValueError(
+            "Scientific GIF crop contains too few grid points: "
+            f"nx={ix.size}, nz={iz.size}."
+        )
+
+    def crop_frame(frame: np.ndarray) -> np.ndarray:
+        return frame[np.ix_(iz, ix)]
+
+    if nframes_total > max_frames:
+        frame_ids = np.linspace(
+            0,
+            nframes_total - 1,
+            max_frames,
+        ).astype(np.int64)
+    else:
+        frame_ids = np.arange(
+            nframes_total,
+            dtype=np.int64,
+        )
+
+    # Scale from the scientific domain only. Hidden sponge amplitudes must not
+    # determine the displayed dynamic range.
     sample_vals = []
     for iframe in frame_ids:
         frame = _snapshot_frame_2d(
@@ -1199,32 +1241,46 @@ def make_wavefield_gif(
             nx=grid.nx,
             nz=grid.nz,
         )
-        sample_vals.append(np.ravel(frame))
+        sample_vals.append(
+            crop_frame(frame).ravel()
+        )
 
     sample_vals = np.concatenate(sample_vals)
-    vmax = float(np.percentile(np.abs(sample_vals), percentile_clip))
+    vmax = float(
+        np.percentile(
+            np.abs(sample_vals),
+            percentile_clip,
+        )
+    )
 
     if not np.isfinite(vmax) or vmax <= 0.0:
         vmax = 1.0
 
     extent = [
-        float(grid.x[0]),
-        float(grid.x[-1]),
-        float(grid.z[-1]),
-        float(grid.z[0]),
+        float(x_grid[ix[0]]),
+        float(x_grid[ix[-1]]),
+        float(z_grid[iz[-1]]),
+        float(z_grid[iz[0]]),
     ]
 
     x_cable = np.asarray(x_cable, dtype=np.float64)
     z_cable = np.asarray(z_cable, dtype=np.float64)
 
     fig, ax = plt.subplots(figsize=(7.5, 9.0))
-    fig.subplots_adjust(left=0.12, right=0.86, top=0.92, bottom=0.08)
+    fig.subplots_adjust(
+        left=0.12,
+        right=0.86,
+        top=0.92,
+        bottom=0.08,
+    )
 
-    frame0 = _snapshot_frame_2d(
-        snapshots_vz,
-        int(frame_ids[0]),
-        nx=grid.nx,
-        nz=grid.nz,
+    frame0 = crop_frame(
+        _snapshot_frame_2d(
+            snapshots_vz,
+            int(frame_ids[0]),
+            nx=grid.nx,
+            nz=grid.nz,
+        )
     )
 
     im = ax.imshow(
@@ -1238,10 +1294,14 @@ def make_wavefield_gif(
         interpolation="nearest",
     )
 
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar = fig.colorbar(
+        im,
+        ax=ax,
+        fraction=0.046,
+        pad=0.04,
+    )
     cbar.set_label("Vz [m/s]")
 
-    # Static overlays.
     ax.plot(
         x_cable,
         z_cable,
@@ -1280,11 +1340,21 @@ def make_wavefield_gif(
         ha="left",
         va="top",
         fontsize=11,
-        bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+        bbox=dict(
+            facecolor="white",
+            alpha=0.75,
+            edgecolor="none",
+        ),
     )
 
-    ax.set_xlim(float(grid.x[0]), float(grid.x[-1]))
-    ax.set_ylim(float(grid.z[-1]), float(grid.z[0]))
+    ax.set_xlim(
+        float(plot_x_min_m),
+        float(plot_x_max_m),
+    )
+    ax.set_ylim(
+        float(plot_z_max_m),
+        float(z_grid[0]),
+    )
     ax.set_xlabel("Projected 2D section coordinate X [m]")
     ax.set_ylabel("Depth [m]")
     ax.set_title(title)
@@ -1293,15 +1363,19 @@ def make_wavefield_gif(
     def update(k: int):
         iframe = int(frame_ids[k])
 
-        frame = _snapshot_frame_2d(
-            snapshots_vz,
-            iframe,
-            nx=grid.nx,
-            nz=grid.nz,
+        frame = crop_frame(
+            _snapshot_frame_2d(
+                snapshots_vz,
+                iframe,
+                nx=grid.nx,
+                nz=grid.nz,
+            )
         )
 
         im.set_data(frame)
-        time_text.set_text(f"t = {snapshot_times[iframe]:.3f} s")
+        time_text.set_text(
+            f"t = {snapshot_times[iframe]:.3f} s"
+        )
         return im, time_text
 
     anim = FuncAnimation(
@@ -1312,7 +1386,10 @@ def make_wavefield_gif(
         blit=False,
     )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
     anim.save(
         out_path,
         writer=PillowWriter(fps=fps),
@@ -1460,44 +1537,47 @@ def main() -> None:
     # not move the sponge into the scientific model domain.
     baseline_n_boundary = 40
     baseline_x_padding_m = 800.0
-    baseline_z_max_m = 9000.0
 
-    # Physical undamped margins in the original n40 model.
+    # --------------------------------------------------------------------------
+    # Scientific and computational domains
+    # --------------------------------------------------------------------------
+    # Geological/interpreted model ends at 5 km.
+    # The bottom absorbing sponge is appended outside this domain.
+    scientific_z_max_m = 5000.0
+
+    sponge_width_x_m = n_boundary * dx
+    sponge_width_z_m = n_boundary * dz
+
+    computational_z_max_m = (
+        scientific_z_max_m
+        + sponge_width_z_m
+    )
+
+    # Preserve the existing undamped lateral margin.
     baseline_undamped_side_margin_m = (
         baseline_x_padding_m
         - baseline_n_boundary * dx
     )
-    baseline_bottom_sponge_entry_m = (
-        baseline_z_max_m
-        - baseline_n_boundary * dz
-    )
 
-    # Add real physical model space, not just more absorbing cells.
     extra_scientific_x_margin_m = 500.0
 
+    # Includes the side sponge outside the scientific domain.
     x_padding_m = (
         baseline_undamped_side_margin_m
         + extra_scientific_x_margin_m
-        + n_boundary * dx
+        + sponge_width_x_m
     )
 
-    z_max_m = (
-        baseline_bottom_sponge_entry_m
-        + n_boundary * dz
-    )
-
-    print("\nAbsorbing-boundary configuration")
-    print("--------------------------------")
-    print(f"n_boundary                 : {n_boundary}")
-    print(f"gamma_s                    : {gamma_s:.1f}")
-    print(f"sponge width               : {n_boundary * dx:.1f} m")
+    print(f"side sponge width          : {sponge_width_x_m:.1f} m")
+    print(f"bottom sponge width        : {sponge_width_z_m:.1f} m")
     print(
         "undamped side margin      : "
         f"{baseline_undamped_side_margin_m + extra_scientific_x_margin_m:.1f} m"
     )
     print(f"extra scientific x margin  : {extra_scientific_x_margin_m:.1f} m")
     print(f"total x padding            : {x_padding_m:.1f} m")
-    print(f"model bottom               : {z_max_m:.1f} m")
+    print(f"scientific model bottom    : {scientific_z_max_m:.1f} m")
+    print(f"computational grid bottom  : {computational_z_max_m:.1f} m")
 
     if source_mode == "catalog_event":
         # Use the actual acquisition parameters of the selected real event.
@@ -1547,7 +1627,7 @@ def main() -> None:
         # Enlarged outward so that the wider sponge does not consume the
         # original physical model interior.
         x_padding_m=x_padding_m,
-        z_max_m=z_max_m,
+        z_max_m=computational_z_max_m,
         z_padding_bottom_m=2500.0,
 
         z_tie_m=None,
@@ -1566,6 +1646,33 @@ def main() -> None:
         smooth_initial_sigma_m=80.0,
     )
 
+    expected_bottom_tolerance_m = 0.51 * dz
+
+    if (
+        abs(float(grid.z[-1]) - computational_z_max_m)
+        > expected_bottom_tolerance_m
+    ):
+        raise RuntimeError(
+            "Unexpected computational grid bottom: "
+            f"grid.z[-1]={grid.z[-1]:.1f} m, "
+            f"expected {computational_z_max_m:.1f} m. "
+            "Check build_safod_model z_max_m/z_padding_bottom_m semantics."
+        )
+
+    # Scientific plotting/inversion domain. The side and bottom sponge remain
+    # in the computational arrays but lie outside these limits.
+    scientific_x_min_m = float(
+        grid.x[0] + sponge_width_x_m
+    )
+    scientific_x_max_m = float(
+        grid.x[-1] - sponge_width_x_m
+    )
+
+    if scientific_x_min_m >= scientific_x_max_m:
+        raise RuntimeError(
+            "Scientific x domain is empty after removing side sponge cells."
+        )
+
     duration = float((grid.nt - 1) * grid.dt)
 
     print("\nSAFOD initial forward run")
@@ -1580,6 +1687,10 @@ def main() -> None:
     print(f"SAF tie    : x={metadata.x_tie_m:.1f} m, z={metadata.z_tie_m:.1f} m")
     print(f"GL         : {gauge_length_m:.4f} m")
     print(f"receiver ds: {channel_spacing_m:.2f} m")
+    print(
+        "scientific x: "
+        f"{scientific_x_min_m:.1f} to {scientific_x_max_m:.1f} m"
+    )
 
     # --------------------------------------------------------------------------
     # 2. Trim cable and build DAS receivers
@@ -1838,13 +1949,13 @@ def main() -> None:
 
     elif source_mode == "deep_saf":
         # Old synthetic source near the SAF prior.
-        z_src_target_m = 5200.0
+        z_src_target_m = 4500.0
 
         z_src = float(
             np.clip(
                 z_src_target_m,
-                grid.z[0] + (n_boundary + half_order + 10) * grid.dz,
-                grid.z[-1] - (n_boundary + half_order + 10) * grid.dz,
+                grid.z[0] + (half_order + 10) * grid.dz,
+                scientific_z_max_m - (half_order + 10) * grid.dz,
             )
         )
 
@@ -1874,6 +1985,18 @@ def main() -> None:
     else:
         raise ValueError(f"Unknown source_mode: {source_mode!r}")
 
+    if not (
+        scientific_x_min_m <= x_src <= scientific_x_max_m
+        and float(grid.z[0]) <= z_src <= scientific_z_max_m
+    ):
+        raise ValueError(
+            "Source lies outside the scientific model domain: "
+            f"source=({x_src:.1f}, {z_src:.1f}) m, "
+            f"x=[{scientific_x_min_m:.1f}, {scientific_x_max_m:.1f}] m, "
+            f"z=[{grid.z[0]:.1f}, {scientific_z_max_m:.1f}] m. "
+            "Sources must not be placed inside the absorbing sponge."
+        )
+
     check_source_inside_solver_domain(
         grid=grid,
         x_src=x_src,
@@ -1892,6 +2015,7 @@ def main() -> None:
         dt=grid.dt,
         f0_hz=source_f0_hz,
         derivative_order=0,
+        source_time_mode="ricker_moment",
         spreading="bilinear",
     )
 
@@ -1966,7 +2090,22 @@ def main() -> None:
     # would undo the reserved right margin and re-overlap the colorbar.
     place_safod_legend(fig, ax, fontsize=8)
 
-    fig.savefig(out_dir / "01_model_vp_with_source.png", dpi=220, bbox_inches="tight")
+    # Show only the scientific domain. The numerical side and bottom sponge
+    # remain in the solver arrays but are not presented as geology.
+    ax.set_xlim(
+        scientific_x_min_m,
+        scientific_x_max_m,
+    )
+    ax.set_ylim(
+        scientific_z_max_m,
+        float(grid.z[0]),
+    )
+
+    fig.savefig(
+        out_dir / "01_model_vp_with_source.png",
+        dpi=220,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
     # --------------------------------------------------------------------------
@@ -2005,6 +2144,9 @@ def main() -> None:
             source=source,
             out_path=out_dir / "05_wavefield_vz_moment_tensor.gif",
             title=f"SAFOD Vz wavefield: {event_id_for_title}, double-couple source",
+            plot_x_min_m=scientific_x_min_m,
+            plot_x_max_m=scientific_x_max_m,
+            plot_z_max_m=scientific_z_max_m,
             fps=6,
             max_frames=80,
             percentile_clip=99.5,
@@ -2230,6 +2372,7 @@ def main() -> None:
         source_theta_deg=np.array(source_theta_deg),
         source_f0_hz=np.array(source_f0_hz),
         source_scalar_moment=np.array(source_scalar_moment),
+        source_time_mode=np.array("ricker_moment"),
 
         run_tag=np.array(run_tag),
         n_boundary=np.array(n_boundary),
@@ -2239,7 +2382,12 @@ def main() -> None:
             extra_scientific_x_margin_m
         ),
         x_padding_m=np.array(x_padding_m),
-        z_max_m=np.array(z_max_m),
+        scientific_x_min_m=np.array(scientific_x_min_m),
+        scientific_x_max_m=np.array(scientific_x_max_m),
+        scientific_z_max_m=np.array(scientific_z_max_m),
+        computational_z_max_m=np.array(computational_z_max_m),
+        sponge_width_x_m=np.array(sponge_width_x_m),
+        sponge_width_z_m=np.array(sponge_width_z_m),
 
         grid_x=grid.x,
         grid_z=grid.z,

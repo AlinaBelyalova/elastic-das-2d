@@ -1,3 +1,22 @@
+# ==============================================================================
+# scripts/safod/compare_event.py
+#
+# Compare one prepared real SAFOD DAS event with one synthetic forward run.
+#
+# This version deliberately contains NO observed-ridge picker and NO ridge
+# residuals. The current observed-ridge procedure was not sufficiently robust
+# for interpretation, so the comparison is restricted to:
+#
+#   1. common zero-phase filtering of real and synthetic DAS;
+#   2. signed trace-normalized gathers;
+#   3. Hilbert-envelope gathers;
+#   4. model-based approximate P/S arrival overlays;
+#   5. pre-filter frequency-content QC.
+#
+# Synthetic channels are read from the exact das_raw_channels array saved by
+# scripts.safod.run_forward. No nearest-neighbour remapping is used.
+# ==============================================================================
+
 from __future__ import annotations
 
 import argparse
@@ -9,10 +28,9 @@ import pandas as pd
 
 try:
     from scipy.signal import hilbert
-    from scipy.spatial import cKDTree
 except ImportError as exc:
     raise ImportError(
-        "This script requires scipy.signal and scipy.spatial. "
+        "This script requires scipy.signal. "
         "Run it in the fwi/geo environment where SciPy is installed."
     ) from exc
 
@@ -22,7 +40,6 @@ from scripts.safod.settings import (
     DEFAULT_THETA_DEG,
     FILTER_ORDER,
     FILTER_TAPER_FRAC,
-    GEOMETRY_CSV,
     REAL_EVENT_PACKAGE,
     comparison_dir_for_theta,
     forward_package_for_theta,
@@ -32,9 +49,11 @@ from src.signal_processing import bandpass_traces, median_welch_psd
 
 
 # ==============================================================================
-# INPUTS AND SETTINGS
+# INPUTS AND DISPLAY SETTINGS
 # ==============================================================================
 
+# Display-only shift applied to synthetic time. It is not used to alter the
+# forward output, source time function, or predicted physical travel times.
 SYN_DISPLAY_TIME_SHIFT_S = -0.20
 
 TMIN = -0.30
@@ -47,31 +66,7 @@ TRACE_NORMALIZATION_PERCENTILE = 99.0
 VMAX_SIGNED = 1.0
 VMAX_ENVELOPE = 1.0
 
-# Guided dominant-envelope ridge picker.
-RIDGE_ANCHORS = [
-    (500.0, 1.18),
-    (700.0, 1.02),
-    (1000.0, 0.82),
-    (1300.0, 0.62),
-    (1600.0, 0.36),
-]
-
-RIDGE_PICK_CH_MIN = 500.0
-RIDGE_PICK_CH_MAX = 1650.0
-RIDGE_SEARCH_HALF_WIDTH_S = 0.16
-RIDGE_SMOOTH_WINDOW = 31
-
-# Synthetic S-like envelope ridge. The guide is the model-based S arrival plus
-# the Ricker peak delay. Picking is performed on physical synthetic time;
-# SYN_DISPLAY_TIME_SHIFT_S is display-only and never enters the residual.
-SYN_RIDGE_SEARCH_HALF_WIDTH_S = 0.16
-SOURCE_PEAK_DELAY_FACTOR = 1.2
-
-# Interval used for apparent-velocity and residual statistics.
-FIT_CH_MIN = 550.0
-FIT_CH_MAX = 1550.0
-
-# Frequency-content QC windows (diagnostic only, not picks)
+# Frequency-content QC windows; these are diagnostics, not phase picks.
 PSD_CHANNEL_MIN = 550.0
 PSD_CHANNEL_MAX = 1550.0
 
@@ -93,9 +88,7 @@ PSD_PLOT_FMAX_HZ = 100.0
 # ==============================================================================
 
 def get_scalar(npz, name: str, default=np.nan):
-    """
-    Read a scalar value from an NPZ file.
-    """
+    """Read a scalar value from an NPZ file."""
     if name not in npz.files:
         return default
 
@@ -113,11 +106,9 @@ def get_scalar(npz, name: str, default=np.nan):
 def trace_normalize(
     data: np.ndarray,
     percentile: float = TRACE_NORMALIZATION_PERCENTILE,
-    eps: float = 1e-12,
+    eps: float = 1.0e-12,
 ) -> np.ndarray:
-    """
-    Normalize every trace independently for display only.
-    """
+    """Normalize every trace independently for display only."""
     data = np.asarray(data, dtype=np.float64)
 
     if data.ndim != 2:
@@ -138,10 +129,10 @@ def trace_normalize(
 
 def compute_envelope(data: np.ndarray) -> np.ndarray:
     """
-    Compute Hilbert envelope along the time axis.
+    Compute the Hilbert envelope along time.
 
-    This should be called before cropping the short display interval so that
-    Hilbert edge effects remain as far as possible from the analysed window.
+    The envelope is evaluated before cropping the short display interval so
+    Hilbert-transform edge effects stay away from the analysed window.
     """
     data = np.asarray(data, dtype=np.float64)
 
@@ -158,99 +149,24 @@ def compute_envelope(data: np.ndarray) -> np.ndarray:
     )
 
 
-def nearest_geometry_channel_for_receivers(
-    receiver_x: np.ndarray,
-    receiver_z: np.ndarray,
-    geom_csv: Path,
-) -> np.ndarray:
-    """
-    Map synthetic receiver positions to approximate raw downleg channel numbers.
-    """
-    geom = pd.read_csv(geom_csv)
-
-    required = [
-        "Channel",
-        "X_2D_m",
-        "Z_2D_m",
-    ]
-
-    for column in required:
-        if column not in geom.columns:
-            raise ValueError(
-                f"Missing column {column!r} in {geom_csv}"
-            )
-
-    channels = pd.to_numeric(
-        geom["Channel"],
-        errors="coerce",
-    ).to_numpy(dtype=np.float64)
-
-    geom_x = pd.to_numeric(
-        geom["X_2D_m"],
-        errors="coerce",
-    ).to_numpy(dtype=np.float64)
-
-    geom_z = pd.to_numeric(
-        geom["Z_2D_m"],
-        errors="coerce",
-    ).to_numpy(dtype=np.float64)
-
-    valid = (
-        np.isfinite(channels)
-        & np.isfinite(geom_x)
-        & np.isfinite(geom_z)
-    )
-
-    channels = channels[valid]
-    geom_x = geom_x[valid]
-    geom_z = geom_z[valid]
-
-    receiver_x = np.asarray(receiver_x, dtype=np.float64)
-    receiver_z = np.asarray(receiver_z, dtype=np.float64)
-
-    if receiver_x.shape != receiver_z.shape:
-        raise ValueError(
-            "receiver_x and receiver_z must have matching shapes; "
-            f"got {receiver_x.shape} and {receiver_z.shape}."
-        )
-
-    if channels.size == 0:
-        raise ValueError(
-            f"No valid geometry rows found in {geom_csv}"
-        )
-
-    tree = cKDTree(
-        np.column_stack(
-            [
-                geom_x,
-                geom_z,
-            ]
-        )
-    )
-
-    _, nearest = tree.query(
-        np.column_stack(
-            [
-                receiver_x,
-                receiver_z,
-            ]
-        )
-    )
-
-    return channels[nearest]
-
-
 def sort_by_channel(
     channels: np.ndarray,
     *arrays: np.ndarray,
 ) -> tuple[np.ndarray, ...]:
-    """
-    Sort a channel axis and every corresponding 1D or 2D array.
-    """
+    """Sort a channel axis and all corresponding 1D or 2D arrays."""
     channels = np.asarray(channels, dtype=np.float64)
+
+    if channels.ndim != 1:
+        raise ValueError(
+            f"channels must be 1D, got shape {channels.shape}."
+        )
+
+    if not np.all(np.isfinite(channels)):
+        raise ValueError("Channel axis contains NaN or Inf.")
+
     order = np.argsort(channels)
 
-    output = [
+    output: list[np.ndarray] = [
         channels[order],
     ]
 
@@ -259,8 +175,8 @@ def sort_by_channel(
 
         if array.shape[0] != channels.size:
             raise ValueError(
-                "The first dimension of every array must match the channel axis: "
-                f"{array.shape[0]} != {channels.size}."
+                "The first dimension of every array must match the channel "
+                f"axis: {array.shape[0]} != {channels.size}."
             )
 
         if array.ndim == 1:
@@ -282,10 +198,9 @@ def collapse_duplicate_channels(
     *arrays: np.ndarray,
 ) -> tuple[np.ndarray, ...]:
     """
-    Collapse scalar values assigned to duplicate mapped raw channels.
+    Collapse scalar values assigned to duplicate raw channels.
 
-    This function is used only for scalar P/S arrival times. It does not average
-    waveform traces. Duplicate scalar values are collapsed with the median.
+    This is used only for P/S arrival curves. Waveform traces are never averaged.
     """
     channels = np.asarray(channels, dtype=np.float64)
 
@@ -296,7 +211,7 @@ def collapse_duplicate_channels(
 
     unique_channels = np.unique(channels)
 
-    output = [
+    output: list[np.ndarray] = [
         unique_channels,
     ]
 
@@ -333,302 +248,11 @@ def collapse_duplicate_channels(
     return tuple(output)
 
 
-# ==============================================================================
-# OBSERVED RIDGE DIAGNOSTICS
-# ==============================================================================
-
-def pick_envelope_ridge_guided(
-    *,
-    envelope_normalized: np.ndarray,
-    time_s: np.ndarray,
-    channels: np.ndarray,
-    guide_times_s: np.ndarray,
-    half_width_s: float,
-    smooth_window: int,
-    pick_ch_min: float,
-    pick_ch_max: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Pick the strongest envelope ridge around a supplied guide curve.
-
-    This is deliberately a dominant-envelope picker, not a first-break picker.
-    The same implementation is used for the real and synthetic gathers so the
-    resulting ridge residual compares like with like.
-    """
-    envelope_normalized = np.asarray(
-        envelope_normalized,
-        dtype=np.float64,
-    )
-    time_s = np.asarray(
-        time_s,
-        dtype=np.float64,
-    )
-    channels = np.asarray(
-        channels,
-        dtype=np.float64,
-    )
-    guide_times_s = np.asarray(
-        guide_times_s,
-        dtype=np.float64,
-    )
-
-    if envelope_normalized.shape != (
-        channels.size,
-        time_s.size,
-    ):
-        raise ValueError(
-            "Envelope shape must match channel/time axes: "
-            f"{envelope_normalized.shape} != "
-            f"({channels.size}, {time_s.size})."
-        )
-
-    if guide_times_s.shape != channels.shape:
-        raise ValueError(
-            "guide_times_s must match the channel axis: "
-            f"{guide_times_s.shape} != {channels.shape}."
-        )
-
-    if half_width_s <= 0.0:
-        raise ValueError(
-            f"half_width_s must be positive; got {half_width_s}."
-        )
-
-    ridge_times = np.full(
-        channels.shape,
-        np.nan,
-        dtype=np.float64,
-    )
-    ridge_amplitudes = np.full(
-        channels.shape,
-        np.nan,
-        dtype=np.float64,
-    )
-
-    for i, guide_time in enumerate(guide_times_s):
-        channel = channels[i]
-
-        if (
-            not np.isfinite(channel)
-            or not np.isfinite(guide_time)
-            or channel < pick_ch_min
-            or channel > pick_ch_max
-        ):
-            continue
-
-        search_mask = (
-            (time_s >= guide_time - half_width_s)
-            & (time_s <= guide_time + half_width_s)
-        )
-
-        if np.count_nonzero(search_mask) < 3:
-            continue
-
-        local_times = time_s[search_mask]
-        local_envelope = envelope_normalized[
-            i,
-            search_mask,
-        ]
-
-        if not np.any(np.isfinite(local_envelope)):
-            continue
-
-        local_index = int(
-            np.nanargmax(local_envelope)
-        )
-
-        ridge_times[i] = float(
-            local_times[local_index]
-        )
-        ridge_amplitudes[i] = float(
-            local_envelope[local_index]
-        )
-
-    if smooth_window > 3:
-        if smooth_window % 2 == 0:
-            smooth_window += 1
-
-        min_periods = max(
-            3,
-            smooth_window // 4,
-        )
-
-        ridge_times = (
-            pd.Series(ridge_times)
-            .rolling(
-                window=smooth_window,
-                center=True,
-                min_periods=min_periods,
-            )
-            .median()
-            .to_numpy(dtype=np.float64)
-        )
-
-        ridge_amplitudes = (
-            pd.Series(ridge_amplitudes)
-            .rolling(
-                window=smooth_window,
-                center=True,
-                min_periods=min_periods,
-            )
-            .median()
-            .to_numpy(dtype=np.float64)
-        )
-
-    return (
-        channels,
-        ridge_times,
-        ridge_amplitudes,
-    )
-
-
-def pick_real_ridge_guided(
-    *,
-    real_envelope_normalized: np.ndarray,
-    time_s: np.ndarray,
-    raw_channels: np.ndarray,
-    anchor_ch_t: list[tuple[float, float]],
-    half_width_s: float,
-    smooth_window: int,
-    pick_ch_min: float,
-    pick_ch_max: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Pick the real dominant-envelope ridge around manual guide anchors."""
-    raw_channels = np.asarray(
-        raw_channels,
-        dtype=np.float64,
-    )
-
-    anchors = np.asarray(
-        anchor_ch_t,
-        dtype=np.float64,
-    )
-
-    if anchors.ndim != 2 or anchors.shape[1] != 2:
-        raise ValueError(
-            "anchor_ch_t must be a list of (channel, time) pairs."
-        )
-
-    anchor_order = np.argsort(anchors[:, 0])
-    anchor_channels = anchors[anchor_order, 0]
-    anchor_times = anchors[anchor_order, 1]
-
-    guide_times = np.interp(
-        raw_channels,
-        anchor_channels,
-        anchor_times,
-    )
-
-    return pick_envelope_ridge_guided(
-        envelope_normalized=real_envelope_normalized,
-        time_s=time_s,
-        channels=raw_channels,
-        guide_times_s=guide_times,
-        half_width_s=half_width_s,
-        smooth_window=smooth_window,
-        pick_ch_min=pick_ch_min,
-        pick_ch_max=pick_ch_max,
-    )
-
-
-def equivalent_odd_smoothing_window(
-    *,
-    reference_window: int,
-    target_channels: np.ndarray,
-) -> int:
-    """Scale a raw-channel smoothing width to an irregular target axis."""
-    target_channels = np.asarray(
-        target_channels,
-        dtype=np.float64,
-    )
-
-    unique_channels = np.unique(
-        target_channels[np.isfinite(target_channels)]
-    )
-    steps = np.diff(unique_channels)
-    steps = steps[steps > 0.0]
-
-    if steps.size == 0:
-        return max(3, int(reference_window) | 1)
-
-    median_step = float(np.median(steps))
-    window = int(round(reference_window / median_step))
-    window = max(3, window)
-
-    if window % 2 == 0:
-        window += 1
-
-    return window
-
-
-def estimate_apparent_velocity(
-    *,
-    channels: np.ndarray,
-    times_s: np.ndarray,
-    channel_spacing_m: float,
-    ch_min: float,
-    ch_max: float,
-) -> dict:
-    """
-    Estimate apparent along-fibre velocity from a linear time/channel fit.
-
-        v_app = channel_spacing / abs(dt / dchannel)
-    """
-    channels = np.asarray(
-        channels,
-        dtype=np.float64,
-    )
-    times_s = np.asarray(
-        times_s,
-        dtype=np.float64,
-    )
-
-    valid = (
-        np.isfinite(channels)
-        & np.isfinite(times_s)
-        & (channels >= ch_min)
-        & (channels <= ch_max)
-    )
-
-    n_valid = int(
-        np.count_nonzero(valid)
-    )
-
-    if n_valid < 10:
-        return {
-            "slope_s_per_channel": np.nan,
-            "intercept_s": np.nan,
-            "apparent_velocity_m_s": np.nan,
-            "n": n_valid,
-        }
-
-    slope, intercept = np.polyfit(
-        channels[valid],
-        times_s[valid],
-        deg=1,
-    )
-
-    slope = float(slope)
-    intercept = float(intercept)
-
-    if slope == 0.0 or not np.isfinite(slope):
-        apparent_velocity = np.nan
-    else:
-        apparent_velocity = abs(
-            channel_spacing_m / slope
-        )
-
-    return {
-        "slope_s_per_channel": slope,
-        "intercept_s": intercept,
-        "apparent_velocity_m_s": float(apparent_velocity),
-        "n": n_valid,
-    }
-
-
 def _relative_db(
     psd: np.ndarray,
     *,
     reference_peak: float | None = None,
-    eps: float = 1e-300,
+    eps: float = 1.0e-300,
 ) -> np.ndarray:
     """Convert a non-negative PSD curve to dB relative to a chosen peak."""
     psd = np.asarray(psd, dtype=np.float64)
@@ -642,9 +266,14 @@ def _relative_db(
         )
 
     return 10.0 * np.log10(
-        np.maximum(psd, eps) / max(reference_peak, eps)
+        np.maximum(psd, eps)
+        / max(reference_peak, eps)
     )
 
+
+# ==============================================================================
+# FREQUENCY-CONTENT QC
+# ==============================================================================
 
 def plot_frequency_qc(
     *,
@@ -660,10 +289,11 @@ def plot_frequency_qc(
     out_csv: Path,
 ) -> None:
     """
-    Compare real pre-event noise, real event signal, and synthetic spectral
-    content before the common comparison bandpass is applied.
-    """
+    Compare pre-filter real noise, real event signal, and synthetic spectra.
 
+    Curves are independently normalized because absolute amplitudes from a 2D
+    line-source calculation are not directly calibrated to a 3D earthquake.
+    """
     real_trace_mask = (
         np.isfinite(real_channels)
         & (real_channels >= PSD_CHANNEL_MIN)
@@ -675,14 +305,26 @@ def plot_frequency_qc(
         & (synthetic_channels <= PSD_CHANNEL_MAX)
     )
 
-    f_real, real_signal_psd, real_signal_p10, real_signal_p90 = median_welch_psd(
-        real_data_unfiltered,
-        real_time_s,
-        fs_hz=real_fs_hz,
-        tmin_s=REAL_SIGNAL_TMIN_S,
-        tmax_s=REAL_SIGNAL_TMAX_S,
-        trace_mask=real_trace_mask,
-        segment_length_s=PSD_SEGMENT_LENGTH_S,
+    if np.count_nonzero(real_trace_mask) < 2:
+        raise RuntimeError(
+            "Too few real channels remain in the PSD channel interval."
+        )
+
+    if np.count_nonzero(synthetic_trace_mask) < 2:
+        raise RuntimeError(
+            "Too few synthetic channels remain in the PSD channel interval."
+        )
+
+    f_real, real_signal_psd, real_signal_p10, real_signal_p90 = (
+        median_welch_psd(
+            real_data_unfiltered,
+            real_time_s,
+            fs_hz=real_fs_hz,
+            tmin_s=REAL_SIGNAL_TMIN_S,
+            tmax_s=REAL_SIGNAL_TMAX_S,
+            trace_mask=real_trace_mask,
+            segment_length_s=PSD_SEGMENT_LENGTH_S,
+        )
     )
 
     f_noise, real_noise_psd, _, _ = median_welch_psd(
@@ -706,22 +348,36 @@ def plot_frequency_qc(
     )
 
     if not np.array_equal(f_real, f_noise):
-        real_noise_psd = np.interp(f_real, f_noise, real_noise_psd)
+        real_noise_psd = np.interp(
+            f_real,
+            f_noise,
+            real_noise_psd,
+        )
 
-    eps = 1e-300
+    eps = 1.0e-300
+
     real_snr_db = 10.0 * np.log10(
-        np.maximum(real_signal_psd, eps) / np.maximum(real_noise_psd, eps)
+        np.maximum(real_signal_psd, eps)
+        / np.maximum(real_noise_psd, eps)
     )
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(10, 8),
+        sharex=True,
+    )
     ax0, ax1 = axes
 
-    # Spectrum-shape comparison. Real signal, real noise, and synthetic
-    # are independently normalized because absolute 2D synthetic amplitudes
-    # are not calibrated. Percentile bands use the corresponding median peak.
-    real_signal_peak = float(np.nanmax(real_signal_psd))
-    real_noise_peak = float(np.nanmax(real_noise_psd))
-    synthetic_peak = float(np.nanmax(synthetic_psd))
+    real_signal_peak = float(
+        np.nanmax(real_signal_psd)
+    )
+    real_noise_peak = float(
+        np.nanmax(real_noise_psd)
+    )
+    synthetic_peak = float(
+        np.nanmax(synthetic_psd)
+    )
 
     ax0.plot(
         f_real,
@@ -781,36 +437,75 @@ def plot_frequency_qc(
         FMIN_COMPARE_HZ,
         FMAX_COMPARE_HZ,
         alpha=0.12,
-        label=f"Common band {FMIN_COMPARE_HZ:g}–{FMAX_COMPARE_HZ:g} Hz",
+        label=(
+            f"Common band "
+            f"{FMIN_COMPARE_HZ:g}–{FMAX_COMPARE_HZ:g} Hz"
+        ),
     )
 
-    ax0.set_ylabel("Median PSD relative to peak [dB]")
-    ax0.set_ylim(-80.0, 5.0)
-    ax0.grid(alpha=0.3)
-    ax0.legend(fontsize=9)
+    ax0.set_ylabel(
+        "Median PSD relative to peak [dB]"
+    )
+    ax0.set_ylim(
+        -80.0,
+        5.0,
+    )
+    ax0.grid(
+        alpha=0.3
+    )
+    ax0.legend(
+        fontsize=9
+    )
 
-    # Real SNR
-    ax1.plot(f_real, real_snr_db, linewidth=1.4)
-    ax1.axhline(0.0, linestyle="--", linewidth=1.0)
-    ax1.axvspan(FMIN_COMPARE_HZ, FMAX_COMPARE_HZ, alpha=0.12)
-    ax1.set_xlabel("Frequency [Hz]")
-    ax1.set_ylabel("Real signal / noise PSD [dB]")
-    ax1.grid(alpha=0.3)
+    ax1.plot(
+        f_real,
+        real_snr_db,
+        linewidth=1.4,
+    )
+    ax1.axhline(
+        0.0,
+        linestyle="--",
+        linewidth=1.0,
+    )
+    ax1.axvspan(
+        FMIN_COMPARE_HZ,
+        FMAX_COMPARE_HZ,
+        alpha=0.12,
+    )
+    ax1.set_xlabel(
+        "Frequency [Hz]"
+    )
+    ax1.set_ylabel(
+        "Real signal / noise PSD [dB]"
+    )
+    ax1.grid(
+        alpha=0.3
+    )
 
     max_f = min(
         PSD_PLOT_FMAX_HZ,
         float(np.nanmax(f_real)),
         float(np.nanmax(f_syn)),
     )
-    ax1.set_xlim(0.0, max_f)
+    ax1.set_xlim(
+        0.0,
+        max_f,
+    )
 
     fig.suptitle(
         "SAFOD real/synthetic frequency-content QC\n"
-        "Curves are independently normalized; compare spectral shape, not absolute scale."
+        "Curves are independently normalized; compare spectral shape, "
+        "not absolute scale."
     )
     fig.tight_layout()
-    fig.savefig(out_figure, dpi=220, bbox_inches="tight")
-    plt.close(fig)
+    fig.savefig(
+        out_figure,
+        dpi=220,
+        bbox_inches="tight",
+    )
+    plt.close(
+        fig
+    )
 
     synthetic_interp = np.interp(
         f_real,
@@ -828,26 +523,27 @@ def plot_frequency_qc(
             "real_signal_to_noise_db": real_snr_db,
             "synthetic_psd_interpolated": synthetic_interp,
         }
-    ).to_csv(out_csv, index=False)
+    ).to_csv(
+        out_csv,
+        index=False,
+    )
+
 
 # ==============================================================================
 # PLOTTING HELPERS
 # ==============================================================================
 
-def add_arrival_and_ridge_overlays(
+def add_arrival_overlays(
     *,
     ax,
     arrival_channels: np.ndarray,
     p_arrivals_s: np.ndarray,
     s_arrivals_s: np.ndarray,
-    ridge_channels: np.ndarray | None = None,
-    ridge_times_s: np.ndarray | None = None,
     arrival_time_shift_s: float = 0.0,
     include_labels: bool = True,
+    line_color: str = "black",
 ) -> None:
-    """
-    Add predicted P/S curves and an optional observed ridge.
-    """
+    """Add model-based approximate P/S curves to a gather plot."""
     arrival_channels = np.asarray(
         arrival_channels,
         dtype=np.float64,
@@ -861,11 +557,19 @@ def add_arrival_and_ridge_overlays(
         dtype=np.float64,
     )
 
+    if not (
+        arrival_channels.shape
+        == p_arrivals_s.shape
+        == s_arrivals_s.shape
+    ):
+        raise ValueError(
+            "Arrival channel/P/S arrays must have identical shapes."
+        )
+
     valid_p = (
         np.isfinite(arrival_channels)
         & np.isfinite(p_arrivals_s)
     )
-
     valid_s = (
         np.isfinite(arrival_channels)
         & np.isfinite(s_arrivals_s)
@@ -873,8 +577,9 @@ def add_arrival_and_ridge_overlays(
 
     ax.plot(
         arrival_channels[valid_p],
-        p_arrivals_s[valid_p] + arrival_time_shift_s,
-        color="black",
+        p_arrivals_s[valid_p]
+        + float(arrival_time_shift_s),
+        color=line_color,
         linestyle="--",
         linewidth=1.6,
         label="Predicted P" if include_labels else None,
@@ -883,41 +588,17 @@ def add_arrival_and_ridge_overlays(
 
     ax.plot(
         arrival_channels[valid_s],
-        s_arrivals_s[valid_s] + arrival_time_shift_s,
-        color="black",
+        s_arrivals_s[valid_s]
+        + float(arrival_time_shift_s),
+        color=line_color,
         linestyle=":",
         linewidth=1.9,
         label="Predicted S" if include_labels else None,
         zorder=20,
     )
 
-    if ridge_channels is not None and ridge_times_s is not None:
-        ridge_channels = np.asarray(
-            ridge_channels,
-            dtype=np.float64,
-        )
-        ridge_times_s = np.asarray(
-            ridge_times_s,
-            dtype=np.float64,
-        )
 
-        valid_ridge = (
-            np.isfinite(ridge_channels)
-            & np.isfinite(ridge_times_s)
-        )
-
-        ax.plot(
-            ridge_channels[valid_ridge],
-            ridge_times_s[valid_ridge],
-            color="magenta",
-            linestyle="-",
-            linewidth=2.0,
-            label="Observed ridge" if include_labels else None,
-            zorder=25,
-        )
-
-
-def plot_real_with_arrivals_and_ridge(
+def plot_real_with_arrivals(
     *,
     real_signed_normalized: np.ndarray,
     real_time_s: np.ndarray,
@@ -925,14 +606,10 @@ def plot_real_with_arrivals_and_ridge(
     arrival_channels: np.ndarray,
     p_arrivals_s: np.ndarray,
     s_arrivals_s: np.ndarray,
-    ridge_channels: np.ndarray,
-    ridge_times_s: np.ndarray,
     event_id: str,
     out_path: Path,
 ) -> None:
-    """
-    Real signed DAS gather with P/S arrivals and observed envelope ridge.
-    """
+    """Real signed DAS gather with predicted P/S arrivals only."""
     fig, ax = plt.subplots(
         figsize=(11, 8)
     )
@@ -956,33 +633,35 @@ def plot_real_with_arrivals_and_ridge(
         0.0,
         color="black",
         linewidth=1.0,
-        linestyle="--",
+        linestyle="-.",
         label="Catalogue origin",
     )
 
-    add_arrival_and_ridge_overlays(
+    add_arrival_overlays(
         ax=ax,
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        ridge_channels=ridge_channels,
-        ridge_times_s=ridge_times_s,
         arrival_time_shift_s=0.0,
         include_labels=True,
+        line_color="black",
     )
 
     fig.colorbar(
         image,
         ax=ax,
-        label="trace-normalized amplitude",
+        label="Trace-normalized amplitude",
     )
 
     ax.set_title(
-        f"{event_id} real DAS: predicted arrivals and guided envelope ridge"
+        f"{event_id} real DAS: predicted P/S arrivals"
     )
-    ax.set_xlabel("Raw channel number")
-    ax.set_ylabel("Time from catalogue origin [s]")
-
+    ax.set_xlabel(
+        "Raw channel number"
+    )
+    ax.set_ylabel(
+        "Time from catalogue origin [s]"
+    )
     ax.set_xlim(
         float(real_channels.min()),
         float(real_channels.max()),
@@ -991,9 +670,9 @@ def plot_real_with_arrivals_and_ridge(
         float(real_time_s[-1]),
         float(real_time_s[0]),
     )
-
-    ax.grid(alpha=0.25)
-
+    ax.grid(
+        alpha=0.25
+    )
     ax.legend(
         loc="upper right",
         fontsize=9,
@@ -1001,14 +680,14 @@ def plot_real_with_arrivals_and_ridge(
     )
 
     fig.tight_layout()
-
     fig.savefig(
         out_path,
         dpi=220,
         bbox_inches="tight",
     )
-
-    plt.close(fig)
+    plt.close(
+        fig
+    )
 
 
 def plot_signed_side_by_side(
@@ -1022,16 +701,12 @@ def plot_signed_side_by_side(
     arrival_channels: np.ndarray,
     p_arrivals_s: np.ndarray,
     s_arrivals_s: np.ndarray,
-    ridge_channels: np.ndarray,
-    ridge_times_s: np.ndarray,
     event_id: str,
     source_f0_hz: float,
     source_theta_deg: float,
     out_path: Path,
 ) -> None:
-    """
-    Signed real/synthetic DAS comparison.
-    """
+    """Signed, trace-normalized real/synthetic DAS comparison."""
     fig, axes = plt.subplots(
         1,
         2,
@@ -1060,19 +735,18 @@ def plot_signed_side_by_side(
         0.0,
         color="black",
         linewidth=1.0,
-        linestyle="--",
+        linestyle="-.",
         label="Catalogue origin",
     )
 
-    add_arrival_and_ridge_overlays(
+    add_arrival_overlays(
         ax=ax_real,
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        ridge_channels=ridge_channels,
-        ridge_times_s=ridge_times_s,
         arrival_time_shift_s=0.0,
         include_labels=True,
+        line_color="black",
     )
 
     ax_real.set_title(
@@ -1084,14 +758,13 @@ def plot_signed_side_by_side(
     ax_real.set_ylabel(
         "Time from origin [s]"
     )
-
     ax_real.set_xlim(
         float(real_channels.min()),
         float(real_channels.max()),
     )
-
-    ax_real.grid(alpha=0.25)
-
+    ax_real.grid(
+        alpha=0.25
+    )
     ax_real.legend(
         loc="upper right",
         fontsize=9,
@@ -1117,38 +790,42 @@ def plot_signed_side_by_side(
         0.0,
         color="black",
         linewidth=1.0,
-        linestyle="--",
+        linestyle="-.",
     )
 
-    add_arrival_and_ridge_overlays(
+    add_arrival_overlays(
         ax=ax_syn,
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        ridge_channels=None,
-        ridge_times_s=None,
         arrival_time_shift_s=SYN_DISPLAY_TIME_SHIFT_S,
-        include_labels=False,
+        include_labels=True,
+        line_color="black",
     )
 
     ax_syn.set_title(
         "Synthetic DAS, down-going pass"
     )
     ax_syn.set_xlabel(
-        "Approx. raw channel number"
+        "Exact raw channel number"
     )
-
     ax_syn.set_xlim(
         float(synthetic_channels.min()),
         float(synthetic_channels.max()),
     )
-
-    ax_syn.grid(alpha=0.25)
+    ax_syn.grid(
+        alpha=0.25
+    )
+    ax_syn.legend(
+        loc="upper right",
+        fontsize=9,
+        framealpha=0.9,
+    )
 
     fig.colorbar(
         synthetic_image,
         ax=axes.ravel().tolist(),
-        label="trace-normalized amplitude",
+        label="Trace-normalized amplitude",
         shrink=0.85,
     )
 
@@ -1165,8 +842,9 @@ def plot_signed_side_by_side(
         dpi=220,
         bbox_inches="tight",
     )
-
-    plt.close(fig)
+    plt.close(
+        fig
+    )
 
 
 def plot_envelope_side_by_side(
@@ -1180,18 +858,12 @@ def plot_envelope_side_by_side(
     arrival_channels: np.ndarray,
     p_arrivals_s: np.ndarray,
     s_arrivals_s: np.ndarray,
-    ridge_channels: np.ndarray,
-    ridge_times_s: np.ndarray,
-    synthetic_ridge_channels: np.ndarray,
-    synthetic_ridge_times_s: np.ndarray,
     event_id: str,
     source_f0_hz: float,
     source_theta_deg: float,
     out_path: Path,
 ) -> None:
-    """
-    Real/synthetic Hilbert-envelope comparison.
-    """
+    """Real/synthetic Hilbert-envelope comparison without ridge picks."""
     fig, axes = plt.subplots(
         1,
         2,
@@ -1220,19 +892,18 @@ def plot_envelope_side_by_side(
         0.0,
         color="white",
         linewidth=1.0,
-        linestyle="--",
+        linestyle="-.",
         label="Catalogue origin",
     )
 
-    add_arrival_and_ridge_overlays(
+    add_arrival_overlays(
         ax=ax_real,
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        ridge_channels=ridge_channels,
-        ridge_times_s=ridge_times_s,
         arrival_time_shift_s=0.0,
         include_labels=True,
+        line_color="white",
     )
 
     ax_real.set_title(
@@ -1244,14 +915,13 @@ def plot_envelope_side_by_side(
     ax_real.set_ylabel(
         "Time from origin [s]"
     )
-
     ax_real.set_xlim(
         float(real_channels.min()),
         float(real_channels.max()),
     )
-
-    ax_real.grid(alpha=0.20)
-
+    ax_real.grid(
+        alpha=0.20
+    )
     ax_real.legend(
         loc="upper right",
         fontsize=9,
@@ -1277,47 +947,48 @@ def plot_envelope_side_by_side(
         0.0,
         color="white",
         linewidth=1.0,
-        linestyle="--",
+        linestyle="-.",
     )
 
-    add_arrival_and_ridge_overlays(
+    add_arrival_overlays(
         ax=ax_syn,
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        ridge_channels=synthetic_ridge_channels,
-        ridge_times_s=(
-            np.asarray(synthetic_ridge_times_s, dtype=np.float64)
-            + SYN_DISPLAY_TIME_SHIFT_S
-        ),
         arrival_time_shift_s=SYN_DISPLAY_TIME_SHIFT_S,
         include_labels=True,
+        line_color="white",
     )
 
     ax_syn.set_title(
         "Synthetic DAS envelope"
     )
     ax_syn.set_xlabel(
-        "Approx. raw channel number"
+        "Exact raw channel number"
     )
-
     ax_syn.set_xlim(
         float(synthetic_channels.min()),
         float(synthetic_channels.max()),
     )
-
-    ax_syn.grid(alpha=0.20)
+    ax_syn.grid(
+        alpha=0.20
+    )
+    ax_syn.legend(
+        loc="upper right",
+        fontsize=9,
+        framealpha=0.9,
+    )
 
     fig.colorbar(
         synthetic_image,
         ax=axes.ravel().tolist(),
-        label="trace-normalized envelope",
+        label="Trace-normalized envelope",
         shrink=0.85,
     )
 
     fig.suptitle(
         f"{event_id} real vs synthetic DAS envelopes\n"
-        f"nominal band={FMIN_COMPARE_HZ:.0f}–{FMAX_COMPARE_HZ:.0f} Hz, "
+        f"band={FMIN_COMPARE_HZ:.0f}–{FMAX_COMPARE_HZ:.0f} Hz, "
         f"f0={source_f0_hz:.1f} Hz, "
         f"theta={source_theta_deg:.1f}°",
         y=0.98,
@@ -1328,167 +999,9 @@ def plot_envelope_side_by_side(
         dpi=220,
         bbox_inches="tight",
     )
-
-    plt.close(fig)
-
-
-def plot_real_synthetic_ridge_comparison(
-    *,
-    real_ridge_channels: np.ndarray,
-    real_ridge_times_s: np.ndarray,
-    synthetic_ridge_channels: np.ndarray,
-    synthetic_ridge_times_s: np.ndarray,
-    synthetic_guide_times_s: np.ndarray,
-    residual_channels: np.ndarray,
-    residual_s: np.ndarray,
-    residual_median_s: float,
-    residual_slope_s_per_channel: float,
-    residual_intercept_s: float,
-    centred_rms_s: float,
-    event_id: str,
-    out_path: Path,
-) -> None:
-    """Plot like-for-like real and synthetic envelope ridges and residual."""
-    real_ridge_channels = np.asarray(
-        real_ridge_channels,
-        dtype=np.float64,
+    plt.close(
+        fig
     )
-    real_ridge_times_s = np.asarray(
-        real_ridge_times_s,
-        dtype=np.float64,
-    )
-    synthetic_ridge_channels = np.asarray(
-        synthetic_ridge_channels,
-        dtype=np.float64,
-    )
-    synthetic_ridge_times_s = np.asarray(
-        synthetic_ridge_times_s,
-        dtype=np.float64,
-    )
-    synthetic_guide_times_s = np.asarray(
-        synthetic_guide_times_s,
-        dtype=np.float64,
-    )
-    residual_channels = np.asarray(
-        residual_channels,
-        dtype=np.float64,
-    )
-    residual_s = np.asarray(
-        residual_s,
-        dtype=np.float64,
-    )
-
-    fig, axes = plt.subplots(
-        2,
-        1,
-        figsize=(11, 8),
-        sharex=True,
-        gridspec_kw={"height_ratios": [1.35, 1.0]},
-    )
-    ax_ridge, ax_residual = axes
-
-    valid_real = (
-        np.isfinite(real_ridge_channels)
-        & np.isfinite(real_ridge_times_s)
-    )
-    valid_syn = (
-        np.isfinite(synthetic_ridge_channels)
-        & np.isfinite(synthetic_ridge_times_s)
-    )
-    valid_guide = (
-        np.isfinite(synthetic_ridge_channels)
-        & np.isfinite(synthetic_guide_times_s)
-    )
-
-    ax_ridge.plot(
-        real_ridge_channels[valid_real],
-        real_ridge_times_s[valid_real],
-        linewidth=2.0,
-        label="Real dominant-envelope ridge",
-    )
-    ax_ridge.plot(
-        synthetic_ridge_channels[valid_syn],
-        synthetic_ridge_times_s[valid_syn],
-        linewidth=2.0,
-        label="Synthetic S-like envelope ridge",
-    )
-    ax_ridge.plot(
-        synthetic_ridge_channels[valid_guide],
-        synthetic_guide_times_s[valid_guide],
-        linestyle="--",
-        linewidth=1.2,
-        label="Synthetic pick guide: predicted S + STF peak delay",
-    )
-    ax_ridge.set_ylabel("Physical time from origin [s]")
-    ax_ridge.set_title(
-        f"{event_id}: like-for-like envelope-ridge comparison"
-    )
-    ax_ridge.invert_yaxis()
-    ax_ridge.grid(alpha=0.3)
-    ax_ridge.legend(fontsize=9)
-
-    valid_residual = (
-        np.isfinite(residual_channels)
-        & np.isfinite(residual_s)
-    )
-
-    ax_residual.plot(
-        residual_channels[valid_residual],
-        residual_s[valid_residual],
-        linewidth=0.9,
-        alpha=0.75,
-        label="Real ridge − synthetic ridge",
-    )
-    ax_residual.scatter(
-        residual_channels[valid_residual],
-        residual_s[valid_residual],
-        s=8,
-        alpha=0.65,
-    )
-    ax_residual.axhline(
-        residual_median_s,
-        linestyle="--",
-        linewidth=1.3,
-        label=f"Global median lag = {residual_median_s:+.3f} s",
-    )
-
-    if (
-        np.isfinite(residual_slope_s_per_channel)
-        and np.isfinite(residual_intercept_s)
-        and np.any(valid_residual)
-    ):
-        x_fit = np.linspace(
-            float(np.nanmin(residual_channels[valid_residual])),
-            float(np.nanmax(residual_channels[valid_residual])),
-            200,
-        )
-        y_fit = (
-            residual_slope_s_per_channel * x_fit
-            + residual_intercept_s
-        )
-        ax_residual.plot(
-            x_fit,
-            y_fit,
-            linewidth=1.4,
-            label="Linear differential trend",
-        )
-
-    ax_residual.set_xlabel("Raw channel number")
-    ax_residual.set_ylabel("Real − synthetic ridge [s]")
-    ax_residual.set_title(
-        "Residual after identical envelope-ridge picking; "
-        f"centred RMS={centred_rms_s:.3f} s"
-    )
-    ax_residual.grid(alpha=0.3)
-    ax_residual.legend(fontsize=9)
-
-    fig.tight_layout()
-    fig.savefig(
-        out_path,
-        dpi=220,
-        bbox_inches="tight",
-    )
-    plt.close(fig)
 
 
 # ==============================================================================
@@ -1499,7 +1012,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Compare the prepared real SAFOD DAS event with one synthetic "
-            "forward-model run, including like-for-like envelope-ridge QC."
+            "forward-model run. No observed-ridge picks are used."
         )
     )
 
@@ -1529,12 +1042,20 @@ def main() -> None:
             "2D double-couple parameterisation."
         )
 
-    requested_run_tag = forward_run_tag(args.theta_deg)
+    requested_run_tag = forward_run_tag(
+        args.theta_deg
+    )
     real_pkg = REAL_EVENT_PACKAGE
-    syn_pkg = forward_package_for_theta(args.theta_deg)
-    geom_csv = GEOMETRY_CSV
-    out_dir = comparison_dir_for_theta(args.theta_deg)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    syn_pkg = forward_package_for_theta(
+        args.theta_deg
+    )
+    out_dir = comparison_dir_for_theta(
+        args.theta_deg
+    )
+    out_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     print("\nComparison inputs")
     print("-----------------")
@@ -1542,8 +1063,8 @@ def main() -> None:
     print(f"run tag         : {requested_run_tag}")
     print(f"real package    : {real_pkg}")
     print(f"synthetic pkg   : {syn_pkg}")
-    print(f"geometry CSV    : {geom_csv}")
     print(f"output dir      : {out_dir}")
+
     if not real_pkg.exists():
         raise FileNotFoundError(
             f"Real-event package not found: {real_pkg}"
@@ -1554,137 +1075,231 @@ def main() -> None:
             f"Synthetic package not found: {syn_pkg}"
         )
 
-    if not geom_csv.exists():
-        raise FileNotFoundError(
-            f"Geometry CSV not found: {geom_csv}"
-        )
-
-    real = np.load(
+    with np.load(
         real_pkg,
         allow_pickle=True,
-    )
-
-    synthetic = np.load(
+    ) as real, np.load(
         syn_pkg,
         allow_pickle=True,
-    )
+    ) as synthetic:
+
+        # ----------------------------------------------------------------------
+        # Metadata
+        # ----------------------------------------------------------------------
+        event_id = str(
+            get_scalar(
+                real,
+                "ev_id",
+                "unknown",
+            )
+        )
+
+        source_f0_hz = float(
+            get_scalar(
+                synthetic,
+                "source_f0_hz",
+                np.nan,
+            )
+        )
+
+        source_theta_deg = float(
+            get_scalar(
+                synthetic,
+                "source_theta_deg",
+                np.nan,
+            )
+        )
+
+        if (
+            not np.isfinite(source_f0_hz)
+            or source_f0_hz <= 0.0
+        ):
+            raise ValueError(
+                "Synthetic package contains invalid source_f0_hz: "
+                f"{source_f0_hz}."
+            )
+
+        if not np.isfinite(source_theta_deg):
+            raise ValueError(
+                "Synthetic package does not contain a finite "
+                "source_theta_deg."
+            )
+
+        if not np.isclose(
+            source_theta_deg,
+            args.theta_deg,
+            rtol=0.0,
+            atol=1.0e-9,
+        ):
+            raise ValueError(
+                "Requested mechanism angle does not match the synthetic "
+                "package: "
+                f"requested={args.theta_deg:.6f} deg, "
+                f"package={source_theta_deg:.6f} deg, "
+                f"path={syn_pkg}."
+            )
+
+        package_run_tag = str(
+            get_scalar(
+                synthetic,
+                "run_tag",
+                requested_run_tag,
+            )
+        )
+
+        if package_run_tag != requested_run_tag:
+            raise ValueError(
+                "Synthetic package run_tag does not match the requested path: "
+                f"requested={requested_run_tag!r}, "
+                f"package={package_run_tag!r}."
+            )
+
+        # ----------------------------------------------------------------------
+        # Real DAS
+        # ----------------------------------------------------------------------
+        if "das_data_unfiltered" not in real.files:
+            raise RuntimeError(
+                "Real-event package is from the old preprocessing workflow. "
+                "Rerun: python -m scripts.safod.prepare_event"
+            )
+
+        real_data_unfiltered_full = np.asarray(
+            real["das_data_unfiltered"],
+            dtype=np.float64,
+        )
+        real_time_full = np.asarray(
+            real["t"],
+            dtype=np.float64,
+        )
+        real_channels = np.asarray(
+            real["raw_channels"],
+            dtype=np.float64,
+        )
+        real_fs = float(
+            get_scalar(
+                real,
+                "fs",
+            )
+        )
+
+        if real_data_unfiltered_full.shape != (
+            real_channels.size,
+            real_time_full.size,
+        ):
+            raise ValueError(
+                "Real DAS shape does not match channel/time axes: "
+                f"{real_data_unfiltered_full.shape} != "
+                f"({real_channels.size}, {real_time_full.size})."
+            )
+
+        (
+            real_channels,
+            real_data_unfiltered_full,
+        ) = sort_by_channel(
+            real_channels,
+            real_data_unfiltered_full,
+        )
+
+        # ----------------------------------------------------------------------
+        # Synthetic DAS and exact raw-channel registration
+        # ----------------------------------------------------------------------
+        if "das_raw_channels" not in synthetic.files:
+            raise RuntimeError(
+                "Synthetic package does not contain exact das_raw_channels. "
+                "Rerun scripts.safod.run_forward with the current exact "
+                "registered-channel implementation."
+            )
+
+        synthetic_data_unfiltered_full = np.asarray(
+            synthetic["das_data"],
+            dtype=np.float64,
+        )
+        synthetic_time_full = np.asarray(
+            synthetic["t"],
+            dtype=np.float64,
+        )
+        synthetic_channels = np.asarray(
+            synthetic["das_raw_channels"],
+            dtype=np.float64,
+        )
+        predicted_p = np.asarray(
+            synthetic["arrival_p_das"],
+            dtype=np.float64,
+        )
+        predicted_s = np.asarray(
+            synthetic["arrival_swave_das"],
+            dtype=np.float64,
+        )
+
+        if synthetic_data_unfiltered_full.ndim != 2:
+            raise ValueError(
+                "Synthetic DAS must be 2D; got "
+                f"{synthetic_data_unfiltered_full.shape}."
+            )
+
+        if synthetic_data_unfiltered_full.shape != (
+            synthetic_channels.size,
+            synthetic_time_full.size,
+        ):
+            raise ValueError(
+                "Synthetic DAS shape does not match exact channel/time axes: "
+                f"{synthetic_data_unfiltered_full.shape} != "
+                f"({synthetic_channels.size}, "
+                f"{synthetic_time_full.size})."
+            )
+
+        if not (
+            predicted_p.shape
+            == predicted_s.shape
+            == synthetic_channels.shape
+        ):
+            raise ValueError(
+                "Synthetic P/S arrival arrays must match das_raw_channels: "
+                f"channels={synthetic_channels.shape}, "
+                f"P={predicted_p.shape}, S={predicted_s.shape}."
+            )
+
+        (
+            synthetic_channels,
+            synthetic_data_unfiltered_full,
+            predicted_p,
+            predicted_s,
+        ) = sort_by_channel(
+            synthetic_channels,
+            synthetic_data_unfiltered_full,
+            predicted_p,
+            predicted_s,
+        )
+
+        synthetic_dt = float(
+            get_scalar(
+                synthetic,
+                "dt",
+                np.median(
+                    np.diff(
+                        synthetic_time_full
+                    )
+                ),
+            )
+        )
+
+        if not np.isfinite(synthetic_dt) or synthetic_dt <= 0.0:
+            raise ValueError(
+                f"Invalid synthetic dt: {synthetic_dt}"
+            )
+
+        synthetic_fs = 1.0 / synthetic_dt
+
+    # NPZ files are closed from this point onward.
 
     # --------------------------------------------------------------------------
-    # Metadata
+    # Common zero-phase filtering
     # --------------------------------------------------------------------------
-    event_id = str(
-        get_scalar(
-            real,
-            "ev_id",
-            "NC75336802",
-        )
-    )
-
-    source_f0_hz = float(
-        get_scalar(
-            synthetic,
-            "source_f0_hz",
-            np.nan,
-        )
-    )
-
-    source_theta_deg = float(
-        get_scalar(
-            synthetic,
-            "source_theta_deg",
-            np.nan,
-        )
-    )
-
-    if not np.isfinite(source_f0_hz) or source_f0_hz <= 0.0:
-        raise ValueError(
-            f"Synthetic package contains invalid source_f0_hz: {source_f0_hz}."
-        )
-
-    source_peak_delay_s = float(
-        get_scalar(
-            synthetic,
-            "source_time_function_t0_s",
-            SOURCE_PEAK_DELAY_FACTOR / source_f0_hz,
-        )
-    )
-
-    if not np.isfinite(source_peak_delay_s) or source_peak_delay_s < 0.0:
-        raise ValueError(
-            "Synthetic source peak delay must be finite and non-negative; "
-            f"got {source_peak_delay_s}."
-        )
-
-    if not np.isfinite(source_theta_deg):
-        raise ValueError(
-            "Synthetic package does not contain a finite source_theta_deg."
-        )
-
-    if not np.isclose(
-        source_theta_deg,
-        args.theta_deg,
-        rtol=0.0,
-        atol=1.0e-9,
-    ):
-        raise ValueError(
-            "Requested mechanism angle does not match the synthetic package: "
-            f"requested={args.theta_deg:.6f} deg, "
-            f"package={source_theta_deg:.6f} deg, "
-            f"path={syn_pkg}."
-        )
-
-    package_run_tag = str(
-        get_scalar(
-            synthetic,
-            "run_tag",
-            requested_run_tag,
-        )
-    )
-
-    if package_run_tag != requested_run_tag:
-        raise ValueError(
-            "Synthetic package run_tag does not match the requested path: "
-            f"requested={requested_run_tag!r}, "
-            f"package={package_run_tag!r}."
-        )
-
-    real_channel_spacing_m = float(
-        get_scalar(
-            real,
-            "channel_spacing_m",
-        )
-    )
-
-    # --------------------------------------------------------------------------
-    # Real DAS: load unfiltered data and apply the common zero-phase filter
-    # --------------------------------------------------------------------------
-    if "das_data_unfiltered" not in real.files:
-        raise RuntimeError(
-            "Real-event package is from the old preprocessing workflow. "
-            "Rerun: python -m scripts.safod.prepare_event"
-        )
-
-    real_data_unfiltered_full = np.asarray(
-        real["das_data_unfiltered"], dtype=np.float64
-    )
-    real_time_full = np.asarray(real["t"], dtype=np.float64)
-    real_channels = np.asarray(real["raw_channels"], dtype=np.float64)
-    real_fs = float(get_scalar(real, "fs"))
-
-    if real_data_unfiltered_full.shape != (
-        real_channels.size,
-        real_time_full.size,
-    ):
-        raise ValueError(
-            "Real DAS shape does not match channel/time axes: "
-            f"{real_data_unfiltered_full.shape} != "
-            f"({real_channels.size}, {real_time_full.size})."
-        )
-
     print(
         "Filtering real DAS to "
         f"{FMIN_COMPARE_HZ:.1f}–{FMAX_COMPARE_HZ:.1f} Hz, zero phase..."
     )
+
     real_data_filtered_full = bandpass_traces(
         real_data_unfiltered_full,
         fs_hz=real_fs,
@@ -1694,53 +1309,11 @@ def main() -> None:
         taper_frac=FILTER_TAPER_FRAC,
     )
 
-    real_time_mask = (
-        (real_time_full >= TMIN)
-        & (real_time_full <= TMAX)
-    )
-    if np.count_nonzero(real_time_mask) < 2:
-        raise RuntimeError(
-            "Requested real-data display interval contains fewer than "
-            "two samples."
-        )
-
-    real_envelope_full = compute_envelope(real_data_filtered_full)
-    real_data = real_data_filtered_full[:, real_time_mask]
-    real_time = real_time_full[real_time_mask]
-    real_envelope = real_envelope_full[:, real_time_mask]
-    real_signed_normalized = trace_normalize(real_data)
-    real_envelope_normalized = trace_normalize(real_envelope)
-
-    # --------------------------------------------------------------------------
-    # Synthetic DAS: apply exactly the same common zero-phase filter
-    # --------------------------------------------------------------------------
-    synthetic_data_unfiltered_full = np.asarray(
-        synthetic["das_data"], dtype=np.float64
-    )
-    synthetic_time_full = np.asarray(synthetic["t"], dtype=np.float64)
-
-    if synthetic_data_unfiltered_full.shape[1] != synthetic_time_full.size:
-        raise ValueError(
-            "Synthetic DAS time dimension does not match its time axis: "
-            f"{synthetic_data_unfiltered_full.shape[1]} != "
-            f"{synthetic_time_full.size}."
-        )
-
-    synthetic_dt = float(
-        get_scalar(
-            synthetic,
-            "dt",
-            np.median(np.diff(synthetic_time_full)),
-        )
-    )
-    if synthetic_dt <= 0.0:
-        raise ValueError(f"Invalid synthetic dt: {synthetic_dt}")
-    synthetic_fs = 1.0 / synthetic_dt
-
     print(
         "Filtering synthetic DAS to "
         f"{FMIN_COMPARE_HZ:.1f}–{FMAX_COMPARE_HZ:.1f} Hz, zero phase..."
     )
+
     synthetic_data_filtered_full = bandpass_traces(
         synthetic_data_unfiltered_full,
         fs_hz=synthetic_fs,
@@ -1750,88 +1323,21 @@ def main() -> None:
         taper_frac=FILTER_TAPER_FRAC,
     )
 
-    synthetic_envelope_full = compute_envelope(
-        synthetic_data_filtered_full
-    )
+    # --------------------------------------------------------------------------
+    # Frequency QC uses unfiltered data
+    # --------------------------------------------------------------------------
     synthetic_time_shifted_full = (
-        synthetic_time_full + SYN_DISPLAY_TIME_SHIFT_S
-    )
-    synthetic_time_mask = (
-        (synthetic_time_shifted_full >= TMIN)
-        & (synthetic_time_shifted_full <= TMAX)
-    )
-    if np.count_nonzero(synthetic_time_mask) < 2:
-        raise RuntimeError(
-            "Requested synthetic display interval contains fewer than "
-            "two samples."
-        )
-
-    synthetic_data = synthetic_data_filtered_full[:, synthetic_time_mask]
-    synthetic_envelope = synthetic_envelope_full[:, synthetic_time_mask]
-    synthetic_time_shifted = synthetic_time_shifted_full[
-        synthetic_time_mask
-    ]
-
-    # --------------------------------------------------------------------------
-    # Map synthetic receivers to raw downleg channel numbers
-    # --------------------------------------------------------------------------
-    receiver_x = np.asarray(
-        synthetic["receiver_x"],
-        dtype=np.float64,
+        synthetic_time_full
+        + SYN_DISPLAY_TIME_SHIFT_S
     )
 
-    receiver_z = np.asarray(
-        synthetic["receiver_z"],
-        dtype=np.float64,
-    )
-
-    das_channel_indices = np.asarray(
-        synthetic["das_channel_indices"],
-        dtype=np.int64,
-    )
-
-    receiver_raw_channels = nearest_geometry_channel_for_receivers(
-        receiver_x=receiver_x,
-        receiver_z=receiver_z,
-        geom_csv=geom_csv,
-    )
-
-    synthetic_channels = receiver_raw_channels[
-        das_channel_indices
-    ]
-
-    predicted_p = np.asarray(
-        synthetic["arrival_p_das"],
-        dtype=np.float64,
-    )
-
-    predicted_s = np.asarray(
-        synthetic["arrival_swave_das"],
-        dtype=np.float64,
-    )
-
-    expected_traces = synthetic_data.shape[0]
-
-    for name, array in [
-        ("synthetic_channels", synthetic_channels),
-        ("predicted_p", predicted_p),
-        ("predicted_s", predicted_s),
-        ("synthetic_envelope", synthetic_envelope),
-    ]:
-        if array.shape[0] != expected_traces:
-            raise ValueError(
-                f"{name} first dimension {array.shape[0]} does not match "
-                f"synthetic DAS traces {expected_traces}."
-            )
-
-    # --------------------------------------------------------------------------
-    # Frequency-content QC before the common comparison bandpass
-    # --------------------------------------------------------------------------
     frequency_figure_path = (
-        out_dir / "00_frequency_content_qc.png"
+        out_dir
+        / "00_frequency_content_qc.png"
     )
     frequency_csv_path = (
-        out_dir / "frequency_content_qc.csv"
+        out_dir
+        / "frequency_content_qc.csv"
     )
 
     plot_frequency_qc(
@@ -1847,36 +1353,77 @@ def main() -> None:
         out_csv=frequency_csv_path,
     )
 
-    # Sort waveform, envelope and arrival curves using exactly the same order.
-    (
-        synthetic_channels,
-        synthetic_data,
-        synthetic_envelope,
-        synthetic_envelope_full,
-        predicted_p,
-        predicted_s,
-    ) = sort_by_channel(
-        synthetic_channels,
-        synthetic_data,
-        synthetic_envelope,
-        synthetic_envelope_full,
-        predicted_p,
-        predicted_s,
+    # --------------------------------------------------------------------------
+    # Envelopes are computed before display-window cropping
+    # --------------------------------------------------------------------------
+    real_envelope_full = compute_envelope(
+        real_data_filtered_full
+    )
+    synthetic_envelope_full = compute_envelope(
+        synthetic_data_filtered_full
     )
 
+    real_time_mask = (
+        (real_time_full >= TMIN)
+        & (real_time_full <= TMAX)
+    )
+    synthetic_time_mask = (
+        (synthetic_time_shifted_full >= TMIN)
+        & (synthetic_time_shifted_full <= TMAX)
+    )
+
+    if np.count_nonzero(real_time_mask) < 2:
+        raise RuntimeError(
+            "Requested real-data display interval contains fewer than "
+            "two samples."
+        )
+
+    if np.count_nonzero(synthetic_time_mask) < 2:
+        raise RuntimeError(
+            "Requested synthetic display interval contains fewer than "
+            "two samples."
+        )
+
+    real_time = real_time_full[
+        real_time_mask
+    ]
+    real_data = real_data_filtered_full[
+        :,
+        real_time_mask,
+    ]
+    real_envelope = real_envelope_full[
+        :,
+        real_time_mask,
+    ]
+
+    synthetic_time_shifted = synthetic_time_shifted_full[
+        synthetic_time_mask
+    ]
+    synthetic_data = synthetic_data_filtered_full[
+        :,
+        synthetic_time_mask,
+    ]
+    synthetic_envelope = synthetic_envelope_full[
+        :,
+        synthetic_time_mask,
+    ]
+
+    real_signed_normalized = trace_normalize(
+        real_data
+    )
+    real_envelope_normalized = trace_normalize(
+        real_envelope
+    )
     synthetic_signed_normalized = trace_normalize(
         synthetic_data
     )
-
     synthetic_envelope_normalized = trace_normalize(
         synthetic_envelope
     )
 
-    synthetic_envelope_full_normalized = trace_normalize(
-        synthetic_envelope_full
-    )
-
-    # Build a clean, strictly increasing raw-channel axis for P/S interpolation.
+    # --------------------------------------------------------------------------
+    # Strictly increasing channel axis for plotting arrival curves
+    # --------------------------------------------------------------------------
     (
         arrival_channels,
         predicted_p_unique,
@@ -1898,284 +1445,21 @@ def main() -> None:
     arrival_channels = arrival_channels[
         arrival_range_mask
     ]
-
     predicted_p_unique = predicted_p_unique[
         arrival_range_mask
     ]
-
     predicted_s_unique = predicted_s_unique[
         arrival_range_mask
     ]
 
     if arrival_channels.size < 2:
         raise RuntimeError(
-            "Too few valid mapped arrival channels remain after filtering."
+            "Too few valid exact-channel arrival samples remain after "
+            "restricting to the real-data channel range."
         )
 
     # --------------------------------------------------------------------------
-    # Pick the guided dominant-envelope ridge
-    # --------------------------------------------------------------------------
-    (
-        ridge_channels,
-        ridge_times,
-        ridge_amplitudes,
-    ) = pick_real_ridge_guided(
-        real_envelope_normalized=real_envelope_normalized,
-        time_s=real_time,
-        raw_channels=real_channels,
-        anchor_ch_t=RIDGE_ANCHORS,
-        half_width_s=RIDGE_SEARCH_HALF_WIDTH_S,
-        smooth_window=RIDGE_SMOOTH_WINDOW,
-        pick_ch_min=RIDGE_PICK_CH_MIN,
-        pick_ch_max=RIDGE_PICK_CH_MAX,
-    )
-
-    apparent_velocity_result = estimate_apparent_velocity(
-        channels=ridge_channels,
-        times_s=ridge_times,
-        channel_spacing_m=real_channel_spacing_m,
-        ch_min=FIT_CH_MIN,
-        ch_max=FIT_CH_MAX,
-    )
-
-    # --------------------------------------------------------------------------
-    # Pick the synthetic S-like envelope ridge with the same peak-search method
-    # --------------------------------------------------------------------------
-    synthetic_ridge_guide = (
-        predicted_s
-        + source_peak_delay_s
-    )
-
-    synthetic_smooth_window = equivalent_odd_smoothing_window(
-        reference_window=RIDGE_SMOOTH_WINDOW,
-        target_channels=synthetic_channels,
-    )
-
-    (
-        synthetic_ridge_channels,
-        synthetic_ridge_times,
-        synthetic_ridge_amplitudes,
-    ) = pick_envelope_ridge_guided(
-        envelope_normalized=synthetic_envelope_full_normalized,
-        time_s=synthetic_time_full,
-        channels=synthetic_channels,
-        guide_times_s=synthetic_ridge_guide,
-        half_width_s=SYN_RIDGE_SEARCH_HALF_WIDTH_S,
-        smooth_window=synthetic_smooth_window,
-        pick_ch_min=RIDGE_PICK_CH_MIN,
-        pick_ch_max=RIDGE_PICK_CH_MAX,
-    )
-
-    (
-        synthetic_ridge_channels_unique,
-        synthetic_ridge_times_unique,
-        synthetic_ridge_amplitudes_unique,
-        synthetic_ridge_guide_unique,
-    ) = collapse_duplicate_channels(
-        synthetic_ridge_channels,
-        synthetic_ridge_times,
-        synthetic_ridge_amplitudes,
-        synthetic_ridge_guide,
-    )
-
-    synthetic_ridge_valid = (
-        np.isfinite(synthetic_ridge_channels_unique)
-        & np.isfinite(synthetic_ridge_times_unique)
-        & np.isfinite(synthetic_ridge_guide_unique)
-    )
-
-    synthetic_ridge_channels_unique = (
-        synthetic_ridge_channels_unique[synthetic_ridge_valid]
-    )
-    synthetic_ridge_times_unique = (
-        synthetic_ridge_times_unique[synthetic_ridge_valid]
-    )
-    synthetic_ridge_amplitudes_unique = (
-        synthetic_ridge_amplitudes_unique[synthetic_ridge_valid]
-    )
-    synthetic_ridge_guide_unique = (
-        synthetic_ridge_guide_unique[synthetic_ridge_valid]
-    )
-
-    if synthetic_ridge_channels_unique.size < 10:
-        raise RuntimeError(
-            "Too few valid synthetic ridge samples after mapping/collapse: "
-            f"{synthetic_ridge_channels_unique.size}."
-        )
-
-    # --------------------------------------------------------------------------
-    # Interpolate predicted arrivals to observed ridge channels
-    # --------------------------------------------------------------------------
-    predicted_p_on_ridge = np.interp(
-        ridge_channels,
-        arrival_channels,
-        predicted_p_unique,
-        left=np.nan,
-        right=np.nan,
-    )
-
-    predicted_s_on_ridge = np.interp(
-        ridge_channels,
-        arrival_channels,
-        predicted_s_unique,
-        left=np.nan,
-        right=np.nan,
-    )
-
-    s_residual = (
-        ridge_times
-        - predicted_s_on_ridge
-    )
-
-    residual_mask = (
-        np.isfinite(ridge_channels)
-        & np.isfinite(ridge_times)
-        & np.isfinite(predicted_s_on_ridge)
-        & np.isfinite(s_residual)
-        & (ridge_channels >= FIT_CH_MIN)
-        & (ridge_channels <= FIT_CH_MAX)
-    )
-
-    n_residual = int(
-        np.count_nonzero(residual_mask)
-    )
-
-    if n_residual < 10:
-        raise RuntimeError(
-            f"Too few valid ridge/S residual samples: {n_residual}"
-        )
-
-    residual_values = s_residual[
-        residual_mask
-    ]
-
-    residual_channels = ridge_channels[
-        residual_mask
-    ]
-
-    residual_median = float(
-        np.nanmedian(residual_values)
-    )
-
-    residual_mean = float(
-        np.nanmean(residual_values)
-    )
-
-    residual_std = float(
-        np.nanstd(residual_values)
-    )
-
-    residual_mad = float(
-        np.nanmedian(
-            np.abs(
-                residual_values
-                - residual_median
-            )
-        )
-    )
-
-    residual_slope, residual_intercept = np.polyfit(
-        residual_channels,
-        residual_values,
-        deg=1,
-    )
-
-    residual_slope = float(
-        residual_slope
-    )
-
-    residual_intercept = float(
-        residual_intercept
-    )
-
-    # --------------------------------------------------------------------------
-    # Like-for-like real minus synthetic envelope-ridge residual
-    # --------------------------------------------------------------------------
-    synthetic_ridge_on_real = np.interp(
-        ridge_channels,
-        synthetic_ridge_channels_unique,
-        synthetic_ridge_times_unique,
-        left=np.nan,
-        right=np.nan,
-    )
-
-    synthetic_guide_on_real = np.interp(
-        ridge_channels,
-        synthetic_ridge_channels_unique,
-        synthetic_ridge_guide_unique,
-        left=np.nan,
-        right=np.nan,
-    )
-
-    real_minus_synthetic_ridge = (
-        ridge_times
-        - synthetic_ridge_on_real
-    )
-
-    ridge_match_mask = (
-        np.isfinite(ridge_channels)
-        & np.isfinite(ridge_times)
-        & np.isfinite(synthetic_ridge_on_real)
-        & np.isfinite(real_minus_synthetic_ridge)
-        & (ridge_channels >= FIT_CH_MIN)
-        & (ridge_channels <= FIT_CH_MAX)
-    )
-
-    n_ridge_match = int(
-        np.count_nonzero(ridge_match_mask)
-    )
-
-    if n_ridge_match < 10:
-        raise RuntimeError(
-            "Too few valid real/synthetic ridge matches: "
-            f"{n_ridge_match}."
-        )
-
-    ridge_match_channels = ridge_channels[
-        ridge_match_mask
-    ]
-    ridge_match_values = real_minus_synthetic_ridge[
-        ridge_match_mask
-    ]
-
-    ridge_match_median = float(
-        np.nanmedian(ridge_match_values)
-    )
-    ridge_match_mean = float(
-        np.nanmean(ridge_match_values)
-    )
-    ridge_match_std = float(
-        np.nanstd(ridge_match_values)
-    )
-    ridge_match_mad = float(
-        np.nanmedian(
-            np.abs(
-                ridge_match_values
-                - ridge_match_median
-            )
-        )
-    )
-    ridge_match_centred = (
-        ridge_match_values
-        - ridge_match_median
-    )
-    ridge_match_centred_rms = float(
-        np.sqrt(
-            np.nanmean(
-                ridge_match_centred ** 2
-            )
-        )
-    )
-    ridge_match_slope, ridge_match_intercept = np.polyfit(
-        ridge_match_channels,
-        ridge_match_values,
-        deg=1,
-    )
-    ridge_match_slope = float(ridge_match_slope)
-    ridge_match_intercept = float(ridge_match_intercept)
-
-    # --------------------------------------------------------------------------
-    # Print QC summary
+    # Summary
     # --------------------------------------------------------------------------
     print("\nReal/Synthetic comparison QC")
     print("----------------------------")
@@ -2184,158 +1468,50 @@ def main() -> None:
     print(f"source theta             : {source_theta_deg:.2f} deg")
     print(
         "common comparison band   : "
-        f"{FMIN_COMPARE_HZ:.1f} to {FMAX_COMPARE_HZ:.1f} Hz, "
-        "zero phase"
+        f"{FMIN_COMPARE_HZ:.1f} to {FMAX_COMPARE_HZ:.1f} Hz, zero phase"
     )
     print(f"real DAS shape           : {real_data.shape}")
     print(f"synthetic DAS shape      : {synthetic_data.shape}")
-
     print(
         "real time range          : "
         f"{real_time.min():.3f} to {real_time.max():.3f} s"
     )
-
     print(
         "synthetic display range  : "
         f"{synthetic_time_shifted.min():.3f} to "
         f"{synthetic_time_shifted.max():.3f} s"
     )
-
     print(
         "real channel range       : "
         f"{real_channels.min():.1f} to {real_channels.max():.1f}"
     )
-
     print(
         "synthetic channel range  : "
         f"{synthetic_channels.min():.1f} to "
         f"{synthetic_channels.max():.1f}"
     )
-
     print(
         "P arrival range          : "
         f"{np.nanmin(predicted_p_unique):.3f} to "
         f"{np.nanmax(predicted_p_unique):.3f} s"
     )
-
     print(
         "S arrival range          : "
         f"{np.nanmin(predicted_s_unique):.3f} to "
         f"{np.nanmax(predicted_s_unique):.3f} s"
     )
-
     print(
         "synthetic display shift  : "
         f"{SYN_DISPLAY_TIME_SHIFT_S:+.3f} s"
     )
+    print("observed ridge picker     : disabled")
 
-    print("\nGuided dominant-envelope ridge")
-    print("------------------------------")
-
-    print(
-        "fit channel interval     : "
-        f"{FIT_CH_MIN:.0f} to {FIT_CH_MAX:.0f}"
-    )
-
-    print(
-        "ridge slope              : "
-        f"{apparent_velocity_result['slope_s_per_channel']:.6e} "
-        "s/channel"
-    )
-
-    print(
-        "apparent along-fibre vel.: "
-        f"{apparent_velocity_result['apparent_velocity_m_s']:.1f} m/s"
-    )
-
-    print(
-        "fit samples              : "
-        f"{apparent_velocity_result['n']}"
-    )
-
-    print("\nGuided ridge minus predicted S")
-    print("--------------------------------")
-
-    print(
-        f"median residual          : {residual_median:.4f} s"
-    )
-    print(
-        f"mean residual            : {residual_mean:.4f} s"
-    )
-    print(
-        f"standard deviation       : {residual_std:.4f} s"
-    )
-    print(
-        f"median absolute deviation: {residual_mad:.4f} s"
-    )
-    print(
-        "residual trend           : "
-        f"{residual_slope:.6e} s/channel"
-    )
-
-    print("\nReal ridge minus synthetic ridge")
-    print("---------------------------------")
-    print(f"source peak delay used   : {source_peak_delay_s:.4f} s")
-    print(f"synthetic smooth window  : {synthetic_smooth_window} traces")
-    print(f"matched samples          : {n_ridge_match}")
-    print(f"global median lag        : {ridge_match_median:+.4f} s")
-    print(f"mean residual            : {ridge_match_mean:+.4f} s")
-    print(f"standard deviation       : {ridge_match_std:.4f} s")
-    print(f"median absolute deviation: {ridge_match_mad:.4f} s")
-    print(f"centred RMS              : {ridge_match_centred_rms:.4f} s")
-    print(
-        "differential trend       : "
-        f"{ridge_match_slope:+.6e} s/channel"
-    )
-
-    print(
-        "\nInterpretation note: this residual compares a guided dominant-envelope "
-        "ridge with a straight-ray S first-arrival estimate. It is a QC "
-        "diagnostic, not a formal S-wave travel-time residual. The preferred "
-        "initial-model diagnostic below is real ridge minus synthetic ridge, "
-        "because both are picked with the same envelope-maximum method."
-    )
-
-    # --------------------------------------------------------------------------
-    # Save diagnostic tables
-    # --------------------------------------------------------------------------
-    diagnostic_table = pd.DataFrame(
-        {
-            "raw_channel": ridge_channels,
-            "guided_envelope_ridge_time_s": ridge_times,
-            "guided_envelope_ridge_amplitude": ridge_amplitudes,
-            "predicted_P_time_s": predicted_p_on_ridge,
-            "predicted_S_time_s": predicted_s_on_ridge,
-            "ridge_minus_P_s": (
-                ridge_times
-                - predicted_p_on_ridge
-            ),
-            "ridge_minus_S_s": s_residual,
-            "synthetic_S_envelope_guide_time_s": synthetic_guide_on_real,
-            "synthetic_guided_envelope_ridge_time_s": (
-                synthetic_ridge_on_real
-            ),
-            "real_minus_synthetic_ridge_s": (
-                real_minus_synthetic_ridge
-            ),
-            "real_minus_synthetic_ridge_centered_s": (
-                real_minus_synthetic_ridge
-                - ridge_match_median
-            ),
-        }
-    )
-
-    diagnostic_csv = (
+    summary_csv = (
         out_dir
-        / "observed_ridge_and_arrival_residuals.csv"
+        / "comparison_summary.csv"
     )
 
-    diagnostic_table.to_csv(
-        diagnostic_csv,
-        index=False,
-    )
-
-    summary_table = pd.DataFrame(
+    pd.DataFrame(
         [
             {
                 "event_id": event_id,
@@ -2349,100 +1525,64 @@ def main() -> None:
                 "filter_order": FILTER_ORDER,
                 "filter_taper_frac": FILTER_TAPER_FRAC,
                 "filter_phase": "zero_phase_sosfiltfilt_both",
-                "ridge_type": "guided_dominant_envelope_ridge",
-                "ridge_fit_ch_min": FIT_CH_MIN,
-                "ridge_fit_ch_max": FIT_CH_MAX,
-                "ridge_slope_s_per_channel": (
-                    apparent_velocity_result[
-                        "slope_s_per_channel"
-                    ]
+                "synthetic_channel_mapping": (
+                    "exact_das_raw_channels_from_forward_package"
                 ),
-                "ridge_apparent_velocity_m_s": (
-                    apparent_velocity_result[
-                        "apparent_velocity_m_s"
-                    ]
+                "observed_ridge_picker": "disabled",
+                "comparison_scope": (
+                    "signed gather, Hilbert envelope, predicted P/S overlays, "
+                    "and pre-filter frequency-content QC"
                 ),
-                "ridge_minus_S_median_s": residual_median,
-                "ridge_minus_S_mean_s": residual_mean,
-                "ridge_minus_S_std_s": residual_std,
-                "ridge_minus_S_mad_s": residual_mad,
-                "ridge_minus_S_slope_s_per_channel": residual_slope,
-                "source_peak_delay_s": source_peak_delay_s,
-                "synthetic_ridge_search_half_width_s": (
-                    SYN_RIDGE_SEARCH_HALF_WIDTH_S
-                ),
-                "synthetic_ridge_smooth_window_traces": (
-                    synthetic_smooth_window
-                ),
-                "real_minus_synthetic_ridge_n": n_ridge_match,
-                "real_minus_synthetic_ridge_median_s": ridge_match_median,
-                "real_minus_synthetic_ridge_mean_s": ridge_match_mean,
-                "real_minus_synthetic_ridge_std_s": ridge_match_std,
-                "real_minus_synthetic_ridge_mad_s": ridge_match_mad,
-                "real_minus_synthetic_ridge_centred_rms_s": (
-                    ridge_match_centred_rms
-                ),
-                "real_minus_synthetic_ridge_slope_s_per_channel": (
-                    ridge_match_slope
-                ),
-                "residual_interpretation": (
-                    "Use real-minus-synthetic dominant-envelope ridge for "
-                    "initial-model QC; ridge-minus-straight-ray-S is retained "
-                    "only as a secondary diagnostic"
+                "amplitude_note": (
+                    "Trace-normalized display only; absolute 2D line-source "
+                    "amplitudes are not calibrated to a 3D point earthquake"
                 ),
             }
         ]
-    )
-
-    summary_csv = (
-        out_dir
-        / "comparison_summary.csv"
-    )
-
-    summary_table.to_csv(
+    ).to_csv(
         summary_csv,
         index=False,
     )
+
+    # --------------------------------------------------------------------------
+    # Remove stale ridge products from previous runs
+    # --------------------------------------------------------------------------
+    stale_names = [
+        "01_real_with_arrivals_and_observed_ridge.png",
+        "04_real_vs_synthetic_envelope_ridge.png",
+        "04_observed_ridge_minus_predicted_S.png",
+        "observed_ridge_and_arrival_residuals.csv",
+    ]
+
+    for name in stale_names:
+        stale_path = out_dir / name
+        if stale_path.exists():
+            stale_path.unlink()
+            print(f"Removed stale ridge product: {stale_path}")
 
     # --------------------------------------------------------------------------
     # Figures
     # --------------------------------------------------------------------------
     real_overlay_path = (
         out_dir
-        / "01_real_with_arrivals_and_observed_ridge.png"
+        / "01_real_with_predicted_arrivals.png"
     )
-
     signed_comparison_path = (
         out_dir
         / "02_real_vs_synthetic_signed.png"
     )
-
     envelope_comparison_path = (
         out_dir
         / "03_real_vs_synthetic_envelopes.png"
     )
 
-    ridge_comparison_path = (
-        out_dir
-        / "04_real_vs_synthetic_envelope_ridge.png"
-    )
-
-    legacy_residual_path = (
-        out_dir
-        / "04_observed_ridge_minus_predicted_S.png"
-    )
-    if legacy_residual_path.exists():
-        legacy_residual_path.unlink()
-
-    plot_real_with_arrivals_and_ridge(
+    plot_real_with_arrivals(
         real_signed_normalized=real_signed_normalized,
         real_time_s=real_time,
         real_channels=real_channels,
         arrival_channels=arrival_channels,
         p_arrivals_s=predicted_p_unique,
         s_arrivals_s=predicted_s_unique,
-        ridge_channels=ridge_channels,
-        ridge_times_s=ridge_times,
         event_id=event_id,
         out_path=real_overlay_path,
     )
@@ -2457,8 +1597,6 @@ def main() -> None:
         arrival_channels=arrival_channels,
         p_arrivals_s=predicted_p_unique,
         s_arrivals_s=predicted_s_unique,
-        ridge_channels=ridge_channels,
-        ridge_times_s=ridge_times,
         event_id=event_id,
         source_f0_hz=source_f0_hz,
         source_theta_deg=source_theta_deg,
@@ -2475,30 +1613,10 @@ def main() -> None:
         arrival_channels=arrival_channels,
         p_arrivals_s=predicted_p_unique,
         s_arrivals_s=predicted_s_unique,
-        ridge_channels=ridge_channels,
-        ridge_times_s=ridge_times,
-        synthetic_ridge_channels=synthetic_ridge_channels_unique,
-        synthetic_ridge_times_s=synthetic_ridge_times_unique,
         event_id=event_id,
         source_f0_hz=source_f0_hz,
         source_theta_deg=source_theta_deg,
         out_path=envelope_comparison_path,
-    )
-
-    plot_real_synthetic_ridge_comparison(
-        real_ridge_channels=ridge_channels,
-        real_ridge_times_s=ridge_times,
-        synthetic_ridge_channels=synthetic_ridge_channels_unique,
-        synthetic_ridge_times_s=synthetic_ridge_times_unique,
-        synthetic_guide_times_s=synthetic_ridge_guide_unique,
-        residual_channels=ridge_match_channels,
-        residual_s=ridge_match_values,
-        residual_median_s=ridge_match_median,
-        residual_slope_s_per_channel=ridge_match_slope,
-        residual_intercept_s=ridge_match_intercept,
-        centred_rms_s=ridge_match_centred_rms,
-        event_id=event_id,
-        out_path=ridge_comparison_path,
     )
 
     print("\nSaved outputs")
@@ -2508,8 +1626,6 @@ def main() -> None:
     print(real_overlay_path)
     print(signed_comparison_path)
     print(envelope_comparison_path)
-    print(ridge_comparison_path)
-    print(diagnostic_csv)
     print(summary_csv)
 
 
