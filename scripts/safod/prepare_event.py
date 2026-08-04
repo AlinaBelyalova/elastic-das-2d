@@ -64,6 +64,15 @@ TMIN = PREP_TMIN_S
 TMAX = PREP_TMAX_S
 PCLIP = 96.0
 
+# Full registered deep-cable visual QC. The plotted x coordinate is the
+# immutable physical reference-channel coordinate from GEO_XLSX, not the
+# HDF5 row number. This makes April and June directly comparable even though
+# dCh and interrogator registration changed.
+FULL_CABLE_QC_TMIN_S = -0.50
+FULL_CABLE_QC_TMAX_S = 3.00
+FULL_CABLE_QC_FILTER_PAD_S = 2.00
+FULL_CABLE_QC_PCLIP = 96.0
+
 # ==============================================================================
 # HEADER / METADATA HELPERS
 # ==============================================================================
@@ -273,16 +282,20 @@ def _load_reference_geometry_context() -> dict:
         engine="openpyxl",
     )
 
-    required = [
+    required_numeric = [
         "Channel",
         "Lat_WGS84",
         "Lon_WGS84",
         "TVD_m",
         "MD_m",
     ]
+    required_columns = [
+        *required_numeric,
+        "Section",
+    ]
 
     missing = sorted(
-        set(required).difference(geo.columns)
+        set(required_columns).difference(geo.columns)
     )
 
     if missing:
@@ -292,20 +305,71 @@ def _load_reference_geometry_context() -> dict:
 
     geo = geo.copy()
 
-    for column in required:
+    for column in required_numeric:
         geo[column] = pd.to_numeric(
             geo[column],
             errors="coerce",
         )
 
+    geo["Section"] = (
+        geo["Section"]
+        .astype(str)
+        .str.strip()
+    )
+
     geo = (
         geo
         .replace([np.inf, -np.inf], np.nan)
-        .dropna(subset=required)
+        .dropna(subset=required_numeric)
         .sort_values("Channel")
-        .groupby("Channel", as_index=False)
-        .median(numeric_only=True)
+        .reset_index(drop=True)
     )
+
+    # Channel is the immutable physical cable coordinate. Do not collapse the
+    # table with median(numeric_only=True): that would discard the categorical
+    # Section column required to distinguish spool, down-leg, and up-leg.
+    duplicated_channels = geo["Channel"].duplicated(
+        keep=False
+    )
+
+    if np.any(duplicated_channels):
+        duplicate_values = (
+            geo.loc[duplicated_channels, "Channel"]
+            .drop_duplicates()
+            .tolist()
+        )
+        raise ValueError(
+            "Reference geometry contains duplicate physical Channel values: "
+            f"{duplicate_values[:10]}. Resolve the geometry table explicitly "
+            "instead of averaging rows and losing Section identity."
+        )
+
+    expected_sections = {
+        "Surface Spool",
+        "Down-leg",
+        "Up-leg",
+    }
+    found_sections = set(
+        geo["Section"].unique()
+    )
+    unexpected_sections = sorted(
+        found_sections.difference(expected_sections)
+    )
+
+    if unexpected_sections:
+        raise ValueError(
+            "Reference geometry contains unexpected Section labels: "
+            f"{unexpected_sections}. Expected {sorted(expected_sections)}."
+        )
+
+    for section_name in sorted(expected_sections):
+        if not np.any(
+            geo["Section"].to_numpy() == section_name
+        ):
+            raise ValueError(
+                f"Reference geometry contains no rows for Section "
+                f"{section_name!r}."
+            )
 
     if len(geo) < 10:
         raise RuntimeError(
@@ -318,7 +382,26 @@ def _load_reference_geometry_context() -> dict:
 
     turn_idx = int(np.nanargmax(tvd_full))
 
+    turn_section = str(
+        geo.iloc[turn_idx]["Section"]
+    )
+    if turn_section != "Down-leg":
+        raise RuntimeError(
+            "Deepest reference-cable point is not labelled Down-leg: "
+            f"channel={channel_full[turn_idx]:.1f}, "
+            f"Section={turn_section!r}."
+        )
+
     geo_down = geo.iloc[: turn_idx + 1].copy()
+
+    # The down-going table must not contain up-leg samples.
+    if np.any(
+        geo_down["Section"].to_numpy() == "Up-leg"
+    ):
+        raise RuntimeError(
+            "Reference cable ordering is inconsistent: Up-leg rows appear "
+            "before the deepest/turn-around channel."
+        )
 
     borehole_mask = (
         geo_down["TVD_m"].to_numpy(dtype=np.float64)
@@ -543,7 +626,7 @@ def _finalize_channel_mapping(
         f"{data_idx[0]} to {data_idx[-1]}"
     )
     print(
-        "raw-channel range          : "
+        "physical reference channels: "
         f"{out['Channel'].iloc[0]:.1f} to "
         f"{out['Channel'].iloc[-1]:.1f}"
     )
@@ -655,18 +738,91 @@ def _finalize_channel_mapping(
     }
 
 
+def _reference_channels_from_mapping_table(
+    table: pd.DataFrame,
+    *,
+    context: dict,
+) -> np.ndarray:
+    """
+    Return the immutable physical channel coordinate from GEO_XLSX.
+
+    DataRow/AcquisitionChannel identify the current interrogator recording and
+    can change between acquisitions. ReferenceChannel identifies position on
+    the unchanged physical cable and is therefore the correct common x-axis.
+    """
+    if "ReferenceChannel" in table.columns:
+        reference_channels = pd.to_numeric(
+            table["ReferenceChannel"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+    else:
+        # Backward-compatible reconstruction from unchanged down-leg MD.
+        reference_down = (
+            context["geo_full"]
+            .loc[
+                context["geo_full"]["Section"] == "Down-leg"
+            ]
+            .sort_values("MD_m")
+        )
+
+        reference_md = pd.to_numeric(
+            reference_down["MD_m"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+        reference_channel_axis = pd.to_numeric(
+            reference_down["Channel"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+        target_md = pd.to_numeric(
+            table["MD_m"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+
+        if (
+            np.nanmin(target_md) < np.nanmin(reference_md) - 1.0e-6
+            or np.nanmax(target_md) > np.nanmax(reference_md) + 1.0e-6
+        ):
+            raise ValueError(
+                "Mapped down-leg MD lies outside the unchanged reference "
+                "geometry and ReferenceChannel is absent."
+            )
+
+        reference_channels = np.interp(
+            target_md,
+            reference_md,
+            reference_channel_axis,
+        )
+
+    if not np.all(np.isfinite(reference_channels)):
+        raise ValueError(
+            "Physical ReferenceChannel contains NaN or Inf."
+        )
+
+    if np.any(np.diff(reference_channels) <= 0.0):
+        raise ValueError(
+            "Physical down-leg ReferenceChannel must increase strictly."
+        )
+
+    return reference_channels
+
+
 def load_event_channel_mapping(
     path: Path,
     *,
     context: dict,
 ) -> dict:
     """
-    Load an event-specific mapping from HDF5 data rows to the unchanged
-    physical cable geometry.
+    Load an event-specific HDF5-row registration onto the unchanged cable.
 
-    The CSV changes only the data-row registration.  The physical profile
-    origin, direction, MD, TVD, latitude, and longitude remain tied to the
-    common SAFOD reference geometry.
+    The two coordinates are kept separate:
+
+      data_idx / DataRow
+          row index in the current HDF5 file;
+
+      Channel / ReferenceChannel
+          physical channel coordinate of the unchanged GEO_XLSX cable.
+
+    They are identical for the April registration but not for June.
     """
     path = Path(path)
 
@@ -675,7 +831,7 @@ def load_event_channel_mapping(
             f"Channel-mapping CSV not found: {path}"
         )
 
-    geo = pd.read_csv(path)
+    geo = pd.read_csv(path).copy()
 
     required = [
         "DataRow",
@@ -695,8 +851,6 @@ def load_event_channel_mapping(
             f"{missing}: {path}"
         )
 
-    geo = geo.copy()
-
     data_rows = _integer_index(
         geo["DataRow"],
         name="DataRow",
@@ -712,19 +866,27 @@ def load_event_channel_mapping(
             "Mapped down-leg DataRow values must be contiguous."
         )
 
-    # These are indices into the current HDF5 array.  They are not old
-    # interrogator channel numbers and they do not redefine the borehole.
+    reference_channels = _reference_channels_from_mapping_table(
+        geo,
+        context=context,
+    )
+
     geo["data_idx"] = data_rows
-    geo["Channel"] = data_rows.astype(np.float64)
+    geo["ReferenceChannel"] = reference_channels
+
+    # Standard geometry schema consumed by run_forward.py. Channel now always
+    # means the stable physical cable coordinate, never the HDF5 row number.
+    geo["Channel"] = reference_channels
 
     return _finalize_channel_mapping(
         geo,
         context=context,
         source_description=(
-            f"event-specific HDF5-row registration: {path}"
+            "event-specific HDF5-row -> physical reference-channel "
+            f"registration: {path}"
         ),
-        first_borehole_channel=float(data_rows[0]),
-        turn_channel=float(data_rows[-1]),
+        first_borehole_channel=float(reference_channels[0]),
+        turn_channel=float(reference_channels[-1]),
         turn_tvd_m=float(
             pd.to_numeric(
                 geo["TVD_m"],
@@ -738,7 +900,6 @@ def load_event_channel_mapping(
             ).iloc[-1]
         ),
     )
-
 
 def build_channel_projection_mapping() -> dict:
     """
@@ -788,6 +949,562 @@ def build_channel_projection_mapping() -> dict:
         ),
     )
 
+
+
+def _reference_channels_for_full_table(
+    table: pd.DataFrame,
+    *,
+    context: dict,
+) -> np.ndarray:
+    """Recover physical reference channels for a full down/up table."""
+    if "ReferenceChannel" in table.columns:
+        values = pd.to_numeric(
+            table["ReferenceChannel"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+        return values
+
+    if "Section" not in table.columns or "MD_m" not in table.columns:
+        raise ValueError(
+            "Full registration requires ReferenceChannel, or Section + MD_m "
+            "for reconstruction from GEO_XLSX."
+        )
+
+    output = np.full(
+        len(table),
+        np.nan,
+        dtype=np.float64,
+    )
+
+    section_text = (
+        table["Section"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    for section_name, reference_name in [
+        ("down-leg", "Down-leg"),
+        ("up-leg", "Up-leg"),
+    ]:
+        mask = section_text == section_name
+        if not np.any(mask):
+            continue
+
+        reference = (
+            context["geo_full"]
+            .loc[
+                context["geo_full"]["Section"] == reference_name
+            ]
+            .sort_values("MD_m")
+        )
+
+        reference_md = pd.to_numeric(
+            reference["MD_m"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+        reference_channels = pd.to_numeric(
+            reference["Channel"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+        target_md = pd.to_numeric(
+            table.loc[mask, "MD_m"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+
+        output[mask.to_numpy()] = np.interp(
+            target_md,
+            reference_md,
+            reference_channels,
+        )
+
+    if not np.all(np.isfinite(output)):
+        raise ValueError(
+            "Could not reconstruct all full-cable ReferenceChannel values."
+        )
+
+    return output
+
+
+def build_full_cable_qc_registration(
+    *,
+    n_hdf5_channels: int,
+) -> dict:
+    """
+    Register the physical down-going + up-going deep cable for plotting.
+
+    The physical channel coordinate comes from GEO_XLSX. HDF5 DataRow is used
+    only to select samples. This is why the turn-around remains at reference
+    channel 1700 for both April and June, while its HDF5 row changes.
+    """
+    context = _load_reference_geometry_context()
+
+    reference_dual = (
+        context["geo_full"]
+        .loc[
+            context["geo_full"]["Section"].isin(
+                ["Down-leg", "Up-leg"]
+            )
+        ]
+        .sort_values("Channel")
+        .reset_index(drop=True)
+    )
+
+    reference_min = float(
+        pd.to_numeric(
+            reference_dual["Channel"],
+            errors="raise",
+        ).min()
+    )
+    reference_max = float(
+        pd.to_numeric(
+            reference_dual["Channel"],
+            errors="raise",
+        ).max()
+    )
+    reference_turn = float(
+        context["reference_turn_channel"]
+    )
+
+    if CHANNEL_MAPPING_CSV is None:
+        table = reference_dual.copy()
+        data_rows = _integer_index(
+            table["Channel"],
+            name="reference full-cable Channel",
+        )
+        reference_channels = pd.to_numeric(
+            table["Channel"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+        registration_source = (
+            f"identity reference registration: {GEO_XLSX}"
+        )
+        registration_path = str(GEO_XLSX)
+
+    else:
+        full_path = (
+            Path(CHANNEL_MAPPING_CSV).parent
+            / "mapped_full_dual_pass_geometry.csv"
+        )
+
+        if full_path.exists():
+            table = pd.read_csv(full_path).copy()
+
+            required = {"DataRow", "Section"}
+            missing = sorted(
+                required.difference(table.columns)
+            )
+            if missing:
+                raise ValueError(
+                    "Full dual-pass registration is missing columns "
+                    f"{missing}: {full_path}"
+                )
+
+            section_text = (
+                table["Section"]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+            table = (
+                table.loc[
+                    section_text.isin(["down-leg", "up-leg"])
+                ]
+                .copy()
+                .sort_values("DataRow")
+                .reset_index(drop=True)
+            )
+
+            data_rows = _integer_index(
+                table["DataRow"],
+                name="full-cable DataRow",
+            )
+            reference_channels = _reference_channels_for_full_table(
+                table,
+                context=context,
+            )
+            table["ReferenceChannel"] = reference_channels
+            registration_source = (
+                f"full dual-pass event registration: {full_path}"
+            )
+            registration_path = str(full_path)
+
+        else:
+            # Safe fallback: channelisation is affine along a continuous fibre.
+            # Fit DataRow -> ReferenceChannel using the calibrated downleg, then
+            # extend only over the immutable dual-pass reference range.
+            down = pd.read_csv(
+                CHANNEL_MAPPING_CSV
+            ).copy()
+            down_rows = _integer_index(
+                down["DataRow"],
+                name="downleg DataRow",
+            )
+            down_reference = _reference_channels_from_mapping_table(
+                down,
+                context=context,
+            )
+
+            slope, intercept = np.polyfit(
+                down_rows.astype(np.float64),
+                down_reference,
+                deg=1,
+            )
+            predicted = (
+                slope * down_rows.astype(np.float64)
+                + intercept
+            )
+            fit_rms = float(
+                np.sqrt(
+                    np.mean(
+                        (predicted - down_reference) ** 2
+                    )
+                )
+            )
+
+            if not np.isfinite(slope) or slope <= 0.0:
+                raise RuntimeError(
+                    "Invalid HDF5-row -> ReferenceChannel slope."
+                )
+
+            if fit_rms > 0.10:
+                raise RuntimeError(
+                    "Downleg registration is not sufficiently affine to "
+                    "extend to the full cable: "
+                    f"RMS={fit_rms:.4f} reference channels."
+                )
+
+            all_rows = np.arange(
+                int(n_hdf5_channels),
+                dtype=np.int64,
+            )
+            all_reference = (
+                slope * all_rows.astype(np.float64)
+                + intercept
+            )
+            keep = (
+                (all_reference >= reference_min - 0.5 * slope)
+                & (all_reference <= reference_max + 0.5 * slope)
+            )
+
+            data_rows = all_rows[keep]
+            reference_channels = all_reference[keep]
+            table = pd.DataFrame(
+                {
+                    "DataRow": data_rows,
+                    "ReferenceChannel": reference_channels,
+                    "Section": np.where(
+                        reference_channels <= reference_turn,
+                        "Down-leg",
+                        "Up-leg",
+                    ),
+                }
+            )
+            registration_source = (
+                "affine extension of calibrated downleg because "
+                f"{full_path} was absent; fit RMS={fit_rms:.4f} channels"
+            )
+            registration_path = str(CHANNEL_MAPPING_CSV)
+
+    valid = (
+        (data_rows >= 0)
+        & (data_rows < int(n_hdf5_channels))
+        & np.isfinite(reference_channels)
+        & (reference_channels >= reference_min - 1.0e-6)
+        & (reference_channels <= reference_max + 1.0e-6)
+    )
+
+    data_rows = data_rows[valid]
+    reference_channels = reference_channels[valid]
+    table = table.loc[valid].reset_index(drop=True)
+
+    if data_rows.size < 10:
+        raise RuntimeError(
+            "Too few registered dual-pass rows remain for full-cable QC."
+        )
+
+    if np.any(np.diff(data_rows) <= 0):
+        raise ValueError(
+            "Registered full-cable DataRow must increase strictly."
+        )
+
+    if not np.all(np.diff(data_rows) == 1):
+        raise ValueError(
+            "Registered full-cable DataRow must be contiguous."
+        )
+
+    if np.any(np.diff(reference_channels) <= 0.0):
+        raise ValueError(
+            "Physical ReferenceChannel must increase strictly from downleg "
+            "through upleg."
+        )
+
+    # The reference-channel step should be almost constant because both axes
+    # sample the same continuous fibre uniformly. imshow uses endpoint extent.
+    channel_step = float(
+        np.median(
+            np.diff(reference_channels)
+        )
+    )
+    affine_axis = (
+        reference_channels[0]
+        + channel_step * np.arange(reference_channels.size)
+    )
+    axis_rms = float(
+        np.sqrt(
+            np.mean(
+                (reference_channels - affine_axis) ** 2
+            )
+        )
+    )
+
+    if axis_rms > 0.10:
+        raise RuntimeError(
+            "Reference-channel axis is too nonuniform for imshow: "
+            f"RMS={axis_rms:.4f} channels."
+        )
+
+    turn_data_row = float(
+        np.interp(
+            reference_turn,
+            reference_channels,
+            data_rows.astype(np.float64),
+        )
+    )
+
+    table["DataRow"] = data_rows
+    table["ReferenceChannel"] = reference_channels
+
+    registration_csv = (
+        OUT_DIR
+        / "full_cable_qc_registration.csv"
+    )
+    table.to_csv(
+        registration_csv,
+        index=False,
+    )
+
+    print("\nFull registered deep-cable geometry")
+    print("-----------------------------------")
+    print(f"source                    : {registration_source}")
+    print(
+        "HDF5 data-row range       : "
+        f"{data_rows[0]} to {data_rows[-1]}"
+    )
+    print(
+        "physical reference channel: "
+        f"{reference_channels[0]:.2f} to "
+        f"{reference_channels[-1]:.2f}"
+    )
+    print(
+        "turn-around               : "
+        f"reference channel {reference_turn:.2f}, "
+        f"HDF5 row {turn_data_row:.2f}"
+    )
+    print(f"registered dual-pass rows : {data_rows.size}")
+    print(f"saved registration        : {registration_csv}")
+
+    return {
+        "data_rows": data_rows,
+        "reference_channels": reference_channels,
+        "turn_reference_channel": reference_turn,
+        "turn_data_row": turn_data_row,
+        "registration_path": registration_path,
+        "registration_source": registration_source,
+        "registration_csv": str(registration_csv),
+    }
+
+
+def plot_full_cable_event_qc(
+    *,
+    data_unfiltered_full: np.ndarray,
+    time_s: np.ndarray,
+    fs_hz: float,
+    event_meta: dict,
+    registration: dict,
+    out_path: Path,
+) -> None:
+    """Plot the registered physical deep cable down and back up."""
+    data_unfiltered_full = np.asarray(
+        data_unfiltered_full,
+        dtype=np.float64,
+    )
+    time_s = np.asarray(
+        time_s,
+        dtype=np.float64,
+    )
+    data_rows = np.asarray(
+        registration["data_rows"],
+        dtype=np.int64,
+    )
+    reference_channels = np.asarray(
+        registration["reference_channels"],
+        dtype=np.float64,
+    )
+    turn_reference_channel = float(
+        registration["turn_reference_channel"]
+    )
+
+    if data_unfiltered_full.ndim != 2:
+        raise ValueError(
+            "Full DAS array must be 2D; "
+            f"got shape {data_unfiltered_full.shape}."
+        )
+
+    if data_unfiltered_full.shape[1] != time_s.size:
+        raise ValueError(
+            "Full DAS/time-axis mismatch."
+        )
+
+    if data_rows[0] < 0 or data_rows[-1] >= data_unfiltered_full.shape[0]:
+        raise IndexError(
+            "Full-cable registration points outside the HDF5 data array."
+        )
+
+    filter_tmin = max(
+        float(time_s[0]),
+        FULL_CABLE_QC_TMIN_S - FULL_CABLE_QC_FILTER_PAD_S,
+    )
+    filter_tmax = min(
+        float(time_s[-1]),
+        FULL_CABLE_QC_TMAX_S + FULL_CABLE_QC_FILTER_PAD_S,
+    )
+    filter_mask = (
+        (time_s >= filter_tmin)
+        & (time_s <= filter_tmax)
+    )
+
+    data_filter_window = np.ascontiguousarray(
+        data_unfiltered_full[data_rows][:, filter_mask],
+        dtype=np.float64,
+    )
+    time_filter_window = time_s[filter_mask]
+
+    print("\nFiltering registered full-cable QC window")
+    print("------------------------------------------")
+    print(
+        "filter interval          : "
+        f"{time_filter_window[0]:.3f} to "
+        f"{time_filter_window[-1]:.3f} s"
+    )
+    print(
+        "display interval         : "
+        f"{FULL_CABLE_QC_TMIN_S:.3f} to "
+        f"{FULL_CABLE_QC_TMAX_S:.3f} s"
+    )
+    print(f"registered data shape    : {data_filter_window.shape}")
+    print(f"bandpass                 : {FMIN:.1f} to {FMAX:.1f} Hz")
+
+    filtered = bandpass_traces(
+        data_filter_window,
+        fs_hz=fs_hz,
+        fmin_hz=FMIN,
+        fmax_hz=FMAX,
+        order=FILTER_ORDER,
+        taper_frac=FILTER_TAPER_FRAC,
+    )
+
+    display_mask = (
+        (time_filter_window >= FULL_CABLE_QC_TMIN_S)
+        & (time_filter_window <= FULL_CABLE_QC_TMAX_S)
+    )
+    display = filtered[:, display_mask]
+    display_time = time_filter_window[display_mask]
+
+    clip = float(
+        np.percentile(
+            np.abs(display),
+            FULL_CABLE_QC_PCLIP,
+        )
+    )
+    if not np.isfinite(clip) or clip <= 0.0:
+        clip = 1.0
+
+    fig, ax = plt.subplots(
+        figsize=(20, 12)
+    )
+
+    image = ax.imshow(
+        display.T,
+        extent=[
+            float(reference_channels[0]),
+            float(reference_channels[-1]),
+            float(display_time[-1]),
+            float(display_time[0]),
+        ],
+        aspect="auto",
+        cmap="seismic",
+        vmin=-clip,
+        vmax=clip,
+        interpolation="none",
+    )
+
+    ax.axhline(
+        0.0,
+        color="black",
+        linewidth=1.1,
+        linestyle="--",
+        label="Catalog origin",
+    )
+    ax.axvline(
+        turn_reference_channel,
+        color="black",
+        linewidth=1.0,
+        linestyle=":",
+        label="Cable turn-around",
+    )
+
+    ax.set_xlabel(
+        "Physical reference channel (GEO_XLSX)"
+    )
+    ax.set_ylabel(
+        "Time from catalog origin [s]"
+    )
+    ax.set_title(
+        f"Real DAS {event_meta['event_id']} M{event_meta['mag']:.2f}, "
+        f"registered down + up cable, {FMIN:.0f}-{FMAX:.0f} Hz"
+    )
+    ax.set_xlim(
+        float(reference_channels[0]),
+        float(reference_channels[-1]),
+    )
+    ax.set_ylim(
+        float(display_time[-1]),
+        float(display_time[0]),
+    )
+    ax.grid(alpha=0.20)
+    ax.legend(
+        loc="upper right",
+        fontsize=9,
+        framealpha=0.9,
+    )
+
+    position = ax.get_position()
+    colorbar_ax = fig.add_axes([0.0, 0.0, 0.1, 0.1])
+    colorbar_ax.set_position(
+        [
+            position.x0 + position.width + 0.01,
+            position.y0,
+            0.02,
+            position.height,
+        ]
+    )
+    colorbar = plt.colorbar(
+        image,
+        cax=colorbar_ax,
+    )
+    colorbar.set_label(
+        "strain rate [nm/m/s]"
+    )
+
+    fig.savefig(
+        out_path,
+        dpi=220,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+    print(f"Saved registered full-cable QC plot: {out_path}")
 
 def project_event_to_model(mapping: dict, event_meta: dict) -> dict:
     """
@@ -925,7 +1642,33 @@ def main() -> None:
     ev_proj = project_event_to_model(mapping, event_meta)
 
     # --------------------------------------------------------------------------
-    # 3b. Select the exact HDF5 rows represented by the geometry mapping
+    # 3a. Plot only the physically registered down-going + up-going cable.
+    #     HDF5 rows outside this registration are not cable geometry.
+    # --------------------------------------------------------------------------
+    full_cable_registration = build_full_cable_qc_registration(
+        n_hdf5_channels=D_event_unfiltered_full.shape[0],
+    )
+
+    stale_full_plot = (
+        OUT_DIR / "00_real_das_full_cable_preview.png"
+    )
+    if stale_full_plot.exists():
+        stale_full_plot.unlink()
+
+    plot_full_cable_event_qc(
+        data_unfiltered_full=D_event_unfiltered_full,
+        time_s=t_event,
+        fs_hz=fs,
+        event_meta=event_meta,
+        registration=full_cable_registration,
+        out_path=(
+            OUT_DIR
+            / "00_real_das_registered_dual_pass_preview.png"
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # 3b. Select the exact HDF5 rows represented by the downleg geometry
     # --------------------------------------------------------------------------
     mapping_table = mapping["mapping_table"]
 
@@ -948,14 +1691,23 @@ def main() -> None:
         :,
     ]
 
-    raw_channels_event = mapping_table[
+    reference_channels_event = mapping_table[
         "Channel"
     ].to_numpy(dtype=np.float64)
 
-    if len(raw_channels_event) != D_event_unfiltered.shape[0]:
+    acquisition_channels_event = (
+        pd.to_numeric(
+            mapping_table["AcquisitionChannel"],
+            errors="raise",
+        ).to_numpy(dtype=np.float64)
+        if "AcquisitionChannel" in mapping_table.columns
+        else data_indices.astype(np.float64)
+    )
+
+    if len(reference_channels_event) != D_event_unfiltered.shape[0]:
         raise RuntimeError(
             "Geometry/data alignment failure: "
-            f"{len(raw_channels_event)} geometry rows versus "
+            f"{len(reference_channels_event)} geometry rows versus "
             f"{D_event_unfiltered.shape[0]} DAS traces."
         )
 
@@ -988,9 +1740,9 @@ def main() -> None:
         f"{data_indices[0]} to {data_indices[-1]}"
     )
     print(
-        "mapped raw-channel range   : "
-        f"{raw_channels_event[0]:.1f} to "
-        f"{raw_channels_event[-1]:.1f}"
+        "physical reference channels: "
+        f"{reference_channels_event[0]:.2f} to "
+        f"{reference_channels_event[-1]:.2f}"
     )
     print(
         "selected downleg shape     : "
@@ -1004,14 +1756,18 @@ def main() -> None:
     # --------------------------------------------------------------------------
     # 4. Plot real event gather
     # --------------------------------------------------------------------------
+    old_preview = OUT_DIR / "real_das_event_preview_raw_channels.png"
+    if old_preview.exists():
+        old_preview.unlink()
+
     clip = np.percentile(np.abs(D_event), PCLIP)
 
     fig, ax = plt.subplots(figsize=(16, 8))
     im = ax.imshow(
         D_event.T,
         extent=[
-            float(raw_channels_event[0]),
-            float(raw_channels_event[-1]),
+            float(reference_channels_event[0]),
+            float(reference_channels_event[-1]),
             float(t_event[-1]),
             float(t_event[0]),
         ],
@@ -1023,7 +1779,7 @@ def main() -> None:
     )
     fig.colorbar(im, ax=ax, label="strain rate [nm/m/s]")
     ax.axhline(0.0, color="k", lw=1.1, ls="--", label="Catalog origin")
-    ax.set_xlabel("Raw channel number")
+    ax.set_xlabel("Physical reference channel (GEO_XLSX)")
     ax.set_ylabel(f"Time from {event_meta['origin_time']} [s]")
     ax.set_title(
         f"Real SAFOD DAS event {event_meta['event_id']} "
@@ -1031,7 +1787,7 @@ def main() -> None:
     )
     ax.legend()
     fig.tight_layout()
-    fig.savefig(OUT_DIR / "real_das_event_preview_raw_channels.png", dpi=220, bbox_inches="tight")
+    fig.savefig(OUT_DIR / "real_das_event_preview_reference_channels.png", dpi=220, bbox_inches="tight")
     plt.close(fig)
 
     scale = np.percentile(np.abs(D_event), 99.0, axis=1, keepdims=True)
@@ -1042,8 +1798,8 @@ def main() -> None:
     im = ax.imshow(
         D_norm.T,
         extent=[
-            float(raw_channels_event[0]),
-            float(raw_channels_event[-1]),
+            float(reference_channels_event[0]),
+            float(reference_channels_event[-1]),
             float(t_event[-1]),
             float(t_event[0]),
         ],
@@ -1055,7 +1811,7 @@ def main() -> None:
     )
     fig.colorbar(im, ax=ax, label="trace-normalized amplitude")
     ax.axhline(0.0, color="k", lw=1.1, ls="--", label="Catalog origin")
-    ax.set_xlabel("Raw channel number")
+    ax.set_xlabel("Physical reference channel (GEO_XLSX)")
     ax.set_ylabel(f"Time from {event_meta['origin_time']} [s]")
     ax.set_title(f"Real SAFOD DAS event {event_meta['event_id']} trace-normalized")
     ax.legend()
@@ -1079,7 +1835,16 @@ def main() -> None:
         raw_fs=np.array(raw_fs_db),
         desample_factor=np.array(desample_db),
 
-        raw_channels=raw_channels_event,
+        # Backward-compatible key consumed by run_forward/compare_event.
+        # Its values are now the stable physical reference-channel coordinate.
+        raw_channels=reference_channels_event,
+        reference_channels=reference_channels_event,
+        hdf5_data_rows=data_indices,
+        acquisition_channels=acquisition_channels_event,
+        channel_axis_definition=np.array(
+            "physical ReferenceChannel from unchanged GEO_XLSX; "
+            "HDF5 DataRow stored separately"
+        ),
         first_borehole_channel=np.array(first_borehole_channel),
         turn_channel=np.array(turn_channel),
         turn_tvd_m=np.array(mapping["turn_tvd_m"]),
@@ -1089,6 +1854,20 @@ def main() -> None:
         n_rows_full_geometry=np.array(mapping["n_rows_full"]),
         n_rows_downleg_including_spool=np.array(mapping["n_rows_downleg_including_spool"]),
         n_rows_downleg_model=np.array(mapping["n_rows_downleg_model"]),
+
+        full_cable_qc_data_rows=full_cable_registration["data_rows"],
+        full_cable_qc_reference_channels=(
+            full_cable_registration["reference_channels"]
+        ),
+        full_cable_qc_turn_reference_channel=np.array(
+            full_cable_registration["turn_reference_channel"]
+        ),
+        full_cable_qc_turn_data_row=np.array(
+            full_cable_registration["turn_data_row"]
+        ),
+        full_cable_qc_registration_path=np.array(
+            full_cable_registration["registration_path"]
+        ),
 
         ev_id=np.array(event_meta["event_id"]),
         ev_origin_time=np.array(event_meta["origin_time"]),

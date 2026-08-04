@@ -53,7 +53,7 @@ DAS_SYSTEM_NAME = "SAFOD_QuantX"
 # EVENT REGISTRY
 # ==============================================================================
 
-DEFAULT_EVENT_KEY = "nc75336802"
+DEFAULT_EVENT_KEY = "nc75379261"
 
 EVENTS: dict[str, dict[str, Any]] = {
     "nc75336802": {
