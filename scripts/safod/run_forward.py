@@ -48,6 +48,108 @@ from scripts.safod.settings import (
 )
 
 # ==============================================================================
+# PLOT STYLE
+# ==============================================================================
+
+AXIS_LABEL_FONTSIZE = 14
+TICK_LABEL_FONTSIZE = 11
+TITLE_FONTSIZE = 13
+COLORBAR_LABEL_FONTSIZE = 12
+LEGEND_FONTSIZE = 9
+
+
+def style_axis_text_bold(
+    ax,
+    *,
+    is_colorbar: bool = False,
+) -> None:
+    """
+    Make every visible text element on one Matplotlib axis bold.
+
+    This covers:
+      - x/y axis labels;
+      - x/y tick labels;
+      - titles;
+      - annotations created with ax.text();
+      - legend entries and legend title;
+      - colorbar label/ticks, because a colorbar is also a Matplotlib axis.
+    """
+    label_size = (
+        COLORBAR_LABEL_FONTSIZE
+        if is_colorbar
+        else AXIS_LABEL_FONTSIZE
+    )
+
+    ax.xaxis.label.set_fontsize(label_size)
+    ax.xaxis.label.set_fontweight("bold")
+    ax.yaxis.label.set_fontsize(label_size)
+    ax.yaxis.label.set_fontweight("bold")
+
+    ax.title.set_fontsize(TITLE_FONTSIZE)
+    ax.title.set_fontweight("bold")
+
+    ax.tick_params(
+        axis="both",
+        which="major",
+        labelsize=TICK_LABEL_FONTSIZE,
+        width=1.2,
+        length=5,
+    )
+
+    for label in ax.get_xticklabels():
+        label.set_fontweight("bold")
+
+    for label in ax.get_yticklabels():
+        label.set_fontweight("bold")
+
+    for annotation in ax.texts:
+        annotation.set_fontweight("bold")
+
+    legend = ax.get_legend()
+    if legend is not None:
+        for legend_text in legend.get_texts():
+            legend_text.set_fontweight("bold")
+            legend_text.set_fontsize(LEGEND_FONTSIZE)
+
+        legend_title = legend.get_title()
+        if legend_title is not None:
+            legend_title.set_fontweight("bold")
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+
+
+def style_figure_text_bold(
+    fig,
+    *,
+    main_axis=None,
+) -> None:
+    """
+    Apply bold styling to every axis in a figure, including colorbars.
+
+    main_axis can be supplied to distinguish the main plotting axis from
+    auxiliary colorbar axes.
+    """
+    for axis in fig.axes:
+        style_axis_text_bold(
+            axis,
+            is_colorbar=(
+                main_axis is not None
+                and axis is not main_axis
+            ),
+        )
+
+    figure_title = getattr(
+        fig,
+        "_suptitle",
+        None,
+    )
+    if figure_title is not None:
+        figure_title.set_fontweight("bold")
+        figure_title.set_fontsize(TITLE_FONTSIZE)
+
+
+# ==============================================================================
 # HELPERS
 # ==============================================================================
 
@@ -1027,6 +1129,11 @@ def plot_receiver_gather(
 
     _add_arrival_overlays(ax, arrival_times)
 
+    style_figure_text_bold(
+        fig,
+        main_axis=ax,
+    )
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -1078,6 +1185,11 @@ def plot_das_gather(
     ax.set_title(title)
 
     _add_arrival_overlays(ax, arrival_times)
+
+    style_figure_text_bold(
+        fig,
+        main_axis=ax,
+    )
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=220, bbox_inches="tight")
@@ -1145,7 +1257,6 @@ def make_wavefield_gif(
     metadata,
     source,
     out_path: Path,
-    title: str,
     plot_x_min_m: float,
     plot_x_max_m: float,
     plot_z_max_m: float,
@@ -1270,7 +1381,7 @@ def make_wavefield_gif(
     fig.subplots_adjust(
         left=0.12,
         right=0.86,
-        top=0.92,
+        top=0.98,
         bottom=0.08,
     )
 
@@ -1300,12 +1411,24 @@ def make_wavefield_gif(
         fraction=0.046,
         pad=0.04,
     )
-    cbar.set_label("Vz [m/s]")
+    cbar.set_label(
+        "Vz [m/s]",
+        fontsize=12,
+        fontweight="bold",
+        labelpad=8,
+    )
+    cbar.ax.tick_params(
+        labelsize=10,
+        width=1.1,
+        length=4,
+    )
+    for label in cbar.ax.get_yticklabels():
+        label.set_fontweight("bold")
 
     ax.plot(
         x_cable,
         z_cable,
-        color="white",
+        color="gray",
         lw=2.0,
         label="DAS cable",
         zorder=5,
@@ -1340,6 +1463,7 @@ def make_wavefield_gif(
         ha="left",
         va="top",
         fontsize=11,
+        fontweight="bold",
         bbox=dict(
             facecolor="white",
             alpha=0.75,
@@ -1355,10 +1479,43 @@ def make_wavefield_gif(
         float(plot_z_max_m),
         float(z_grid[0]),
     )
-    ax.set_xlabel("Projected 2D section coordinate X [m]")
-    ax.set_ylabel("Depth [m]")
-    ax.set_title(title)
-    ax.legend(loc="lower left", fontsize=8)
+    ax.set_xlabel(
+        "Projected 2D section coordinate X [m]",
+        fontsize=13,
+        fontweight="bold",
+        labelpad=8,
+    )
+    ax.set_ylabel(
+        "Depth [m]",
+        fontsize=13,
+        fontweight="bold",
+        labelpad=8,
+    )
+
+    ax.tick_params(
+        axis="both",
+        which="major",
+        labelsize=11,
+        width=1.2,
+        length=5,
+    )
+    for label in ax.get_xticklabels():
+        label.set_fontweight("bold")
+    for label in ax.get_yticklabels():
+        label.set_fontweight("bold")
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+
+    ax.legend(
+        loc="lower left",
+        fontsize=LEGEND_FONTSIZE,
+    )
+
+    style_figure_text_bold(
+        fig,
+        main_axis=ax,
+    )
 
     def update(k: int):
         iframe = int(frame_ids[k])
@@ -2101,6 +2258,11 @@ def main() -> None:
         float(grid.z[0]),
     )
 
+    style_figure_text_bold(
+        fig,
+        main_axis=ax,
+    )
+
     fig.savefig(
         out_dir / "01_model_vp_with_source.png",
         dpi=220,
@@ -2143,7 +2305,6 @@ def main() -> None:
             metadata=metadata,
             source=source,
             out_path=out_dir / "05_wavefield_vz_moment_tensor.gif",
-            title=f"SAFOD Vz wavefield: {event_id_for_title}, double-couple source",
             plot_x_min_m=scientific_x_min_m,
             plot_x_max_m=scientific_x_max_m,
             plot_z_max_m=scientific_z_max_m,

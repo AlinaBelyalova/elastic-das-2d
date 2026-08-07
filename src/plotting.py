@@ -232,10 +232,10 @@ def plot_safod_model(
 
     ax.set_xlim(float(grid.x[0]), float(grid.x[-1]))
     ax.set_ylim(float(grid.z[-1]), float(grid.z[0]))
-    ax.set_xlabel("Projected 2D section coordinate X [m]")
+    ax.set_xlabel("Projected 2D coordinate X [m]")
     ax.set_ylabel("Depth [m]")
     title_prefix = "SAFOD initial model" if is_initial else "SAFOD reference/synthetic model"
-    ax.set_title(f"{title_prefix}: {model_label} ({field.upper()})")
+    ax.set_title(f"{title_prefix})")
     ax.grid(False)
 
     # Figure-fraction anchor with a pre-reserved right margin: robust to
