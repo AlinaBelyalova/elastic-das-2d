@@ -82,6 +82,55 @@ SYN_SIGNAL_TMAX_S = 1.8
 PSD_SEGMENT_LENGTH_S = 1.0
 PSD_PLOT_FMAX_HZ = 100.0
 
+AXIS_LABEL_FONTSIZE = 14
+TICK_LABEL_FONTSIZE = 11
+COLORBAR_LABEL_FONTSIZE = 13
+
+
+# ==============================================================================
+# PLOT STYLING
+# ==============================================================================
+
+def style_axes_bold(ax) -> None:
+    """Apply consistent bold axis labels and tick labels."""
+    ax.xaxis.label.set_fontsize(AXIS_LABEL_FONTSIZE)
+    ax.xaxis.label.set_fontweight("bold")
+    ax.yaxis.label.set_fontsize(AXIS_LABEL_FONTSIZE)
+    ax.yaxis.label.set_fontweight("bold")
+
+    ax.tick_params(
+        axis="both",
+        which="major",
+        labelsize=TICK_LABEL_FONTSIZE,
+        width=1.2,
+        length=5,
+    )
+
+    for label in ax.get_xticklabels():
+        label.set_fontweight("bold")
+
+    for label in ax.get_yticklabels():
+        label.set_fontweight("bold")
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+
+
+def style_colorbar_bold(colorbar) -> None:
+    """Apply consistent bold label and ticks to one colorbar."""
+    colorbar.ax.yaxis.label.set_fontsize(
+        COLORBAR_LABEL_FONTSIZE
+    )
+    colorbar.ax.yaxis.label.set_fontweight("bold")
+    colorbar.ax.tick_params(
+        labelsize=TICK_LABEL_FONTSIZE,
+        width=1.1,
+        length=4,
+    )
+
+    for label in colorbar.ax.get_yticklabels():
+        label.set_fontweight("bold")
+
 
 # ==============================================================================
 # GENERAL HELPERS
@@ -492,6 +541,9 @@ def plot_frequency_qc(
         max_f,
     )
 
+    style_axes_bold(ax0)
+    style_axes_bold(ax1)
+
     fig.suptitle(
         "SAFOD real/synthetic frequency-content QC\n"
         "Curves are independently normalized; compare spectral shape, "
@@ -647,7 +699,7 @@ def plot_real_with_arrivals(
         line_color="black",
     )
 
-    fig.colorbar(
+    colorbar = fig.colorbar(
         image,
         ax=ax,
         label="Trace-normalized amplitude",
@@ -657,7 +709,7 @@ def plot_real_with_arrivals(
         f"{event_id} real DAS: predicted P/S arrivals"
     )
     ax.set_xlabel(
-        "Raw channel number"
+        "Channel number"
     )
     ax.set_ylabel(
         "Time from catalogue origin [s]"
@@ -678,6 +730,9 @@ def plot_real_with_arrivals(
         fontsize=9,
         framealpha=0.9,
     )
+
+    style_axes_bold(ax)
+    style_colorbar_bold(colorbar)
 
     fig.tight_layout()
     fig.savefig(
@@ -753,7 +808,7 @@ def plot_signed_side_by_side(
         "Real DAS, down-going pass"
     )
     ax_real.set_xlabel(
-        "Raw channel number"
+        "Channel number"
     )
     ax_real.set_ylabel(
         "Time from origin [s]"
@@ -807,7 +862,7 @@ def plot_signed_side_by_side(
         "Synthetic DAS, down-going pass"
     )
     ax_syn.set_xlabel(
-        "Exact raw channel number"
+        "Channel number"
     )
     ax_syn.set_xlim(
         float(synthetic_channels.min()),
@@ -822,12 +877,16 @@ def plot_signed_side_by_side(
         framealpha=0.9,
     )
 
-    fig.colorbar(
+    colorbar = fig.colorbar(
         synthetic_image,
         ax=axes.ravel().tolist(),
         label="Trace-normalized amplitude",
         shrink=0.85,
     )
+
+    style_axes_bold(ax_real)
+    style_axes_bold(ax_syn)
+    style_colorbar_bold(colorbar)
 
     fig.suptitle(
         f"{event_id} real vs synthetic signed DAS\n"
@@ -910,7 +969,7 @@ def plot_envelope_side_by_side(
         "Real DAS envelope"
     )
     ax_real.set_xlabel(
-        "Raw channel number"
+        "Channel number"
     )
     ax_real.set_ylabel(
         "Time from origin [s]"
@@ -964,7 +1023,7 @@ def plot_envelope_side_by_side(
         "Synthetic DAS envelope"
     )
     ax_syn.set_xlabel(
-        "Exact raw channel number"
+        "Channel number"
     )
     ax_syn.set_xlim(
         float(synthetic_channels.min()),
@@ -979,12 +1038,16 @@ def plot_envelope_side_by_side(
         framealpha=0.9,
     )
 
-    fig.colorbar(
+    colorbar = fig.colorbar(
         synthetic_image,
         ax=axes.ravel().tolist(),
         label="Trace-normalized envelope",
         shrink=0.85,
     )
+
+    style_axes_bold(ax_real)
+    style_axes_bold(ax_syn)
+    style_colorbar_bold(colorbar)
 
     fig.suptitle(
         f"{event_id} real vs synthetic DAS envelopes\n"
