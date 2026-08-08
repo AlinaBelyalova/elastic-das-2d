@@ -35,3 +35,7 @@ data/safod/velocity_models/zhang_thurber_bedrosian_2009/raw/
 
 # Local scientific velocity-model data and derived products
 data/safod/velocity_models/
+
+# Local project documentation and archived code
+docs/
+archive/
