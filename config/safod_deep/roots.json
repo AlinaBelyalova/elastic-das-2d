@@ -1,0 +1,46 @@
+{
+  "recording_roots": [
+    {
+      "label": "2026-03-27_first_deep_initial",
+      "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-03/01-FIRST_DEEP-recording_2026-03-28T021653Z",
+      "priority": 10,
+      "notes": "Initial deep-fiber settings; new seismic sonde."
+    },
+    {
+      "label": "2026-03-28_start_deep_tuned",
+      "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-03/02-START-DEEP-recording_2026-03-28T162150Z",
+      "priority": 20,
+      "notes": "Settings tuned the following morning."
+    },
+    {
+      "label": "2026-04-07_detector_attenuator",
+      "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-03/03-recording_2026-04-07T180130Z",
+      "priority": 30,
+      "notes": "Attenuator settings refined; earthquake detector configured."
+    },
+    {
+      "label": "2026-04-14_all_channels_800Hz",
+      "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-03/04-AllChans-recording_2026-04-14T220501Z",
+      "priority": 40,
+      "notes": "All channels including reference spool; last live channel 5945; ping 8 kHz; fs 800 Hz."
+    },
+    {
+      "label": "2026-05-01_initial",
+      "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-05/recording_2026-05-01T002450Z",
+      "priority": 50,
+      "notes": "May 1 initial configuration."
+    },
+    {
+      "label": "2026-05-01_10kHz_no_spool_update",
+      "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-05/10kHz_noSpoool_2026-05-01T015032Z",
+      "priority": 60,
+      "notes": "May 1 update; no spool."
+    },
+    {
+      "label": "2026-05-01_final_no_spool_1000Hz",
+      "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-05/01_nosppol_10kHz_2026-05-01T041000Z",
+      "priority": 70,
+      "notes": "Final May configuration; no reference spool; fs 1000 Hz; detector noise suppression off."
+    }
+  ]
+}

@@ -12,8 +12,8 @@
 #       controlled synthetic QC.
 #
 # Requirements:
-#   - src.safod_builder.build_safod_model
-#   - src.safod_builder.fault_x_at_z
+#   - src.safod.models.factory.build_initial_model
+#   - src.safod.models.smooth_prior.fault_x_at_z
 #   - src.das supports continuous physical gauge lengths, e.g. GL=16.6213 m
 #   - src.plotting.place_safod_legend for figure-fraction legend placement
 #     (do NOT call fig.tight_layout() after plot_safod_model() — it would
@@ -29,7 +29,10 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from src.safod_builder import build_safod_model, fault_x_at_z
+from src.safod.models import (
+    build_initial_model,
+    fault_x_at_z,
+)
 from src.source import build_dc_source
 from src.receivers import (
     build_das_cable,
@@ -212,6 +215,11 @@ def load_real_event_package(path: Path) -> dict:
                     )
                 )
             )
+            if not geom_file.exists():
+                relocated_geom_file = event_dir / geom_file.name
+                if relocated_geom_file.exists():
+                    geom_file = relocated_geom_file
+
         else:
             geom_file = (
                 event_dir
@@ -1581,6 +1589,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--initial-model",
+        choices=(
+            "smooth_prior",
+            "digitized_log",
+        ),
+        default="digitized_log",
+        help=(
+            "SAFOD initial velocity model. "
+            "'smooth_prior' reproduces the previous smooth model; "
+            "'digitized_log' uses the digitized "
+            "Ellsworth & Malin (2011) Vp/Vs logs. "
+            "Default: digitized_log."
+        ),
+    )
+
     gif_group = parser.add_mutually_exclusive_group()
 
     gif_group.add_argument(
@@ -1646,7 +1670,10 @@ def main() -> None:
         event_cfg = load_real_event_package(real_event_package)
         geom_file = event_cfg["geom_file"]
         # geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
-        out_dir = forward_dir_for_theta(args.theta_deg)
+        out_dir = (
+            forward_dir_for_theta(args.theta_deg)
+            / args.initial_model
+        )
     elif source_mode == "deep_saf":
         geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
         out_dir = Path("results/safod_initial_forward")
@@ -1669,6 +1696,7 @@ def main() -> None:
     print("------------")
     print(f"run tag       : {run_tag}")
     print(f"theta         : {args.theta_deg:.1f} deg")
+    print(f"initial model : {args.initial_model}")
     print(f"save GIF      : {args.save_gif}")
     print(f"output dir    : {out_dir}")
 
@@ -1769,38 +1797,58 @@ def main() -> None:
         x_column = "Z_2D_m"
         z_column = "X_2D_m"
 
-    grid, model, x_cable_raw, z_cable_raw, metadata = build_safod_model(
-        geom_file=geom_file,
-        x_column=x_column,
-        z_column=z_column,
-        build_initial_model=True,
-        dx=dx,
-        dz=dz,
-        dt=None,
-        nt=nt,
-        half_order=half_order,
-        cfl_safety=0.80,
 
-        # Enlarged outward so that the wider sponge does not consume the
-        # original physical model interior.
-        x_padding_m=x_padding_m,
-        z_max_m=computational_z_max_m,
-        z_padding_bottom_m=2500.0,
+    digitized_log_csv = Path(
+        "data/safod/velocity_models/"
+        "ellsworth_malin_2011/"
+        "fig3a_digitized.csv"
+    )
 
-        z_tie_m=None,
-        anchor_fault_to_cable_end=True,
-        fault_offset_from_cable_m=105.0,
-        fault_dip_deg=82.0,
-        fault_dip_sign=-1.0,
-        left_block_name="salinian",
-        right_block_name="franciscan",
-        initial_cross_fault_contrast=-0.08,
-        initial_cross_fault_transition_m=350.0,
-        initial_fault_zone_width_m=160.0,
-        initial_fault_zone_velocity_reduction=0.14,
-        include_pilot_hole_lvz_in_initial=True,
-        initial_pilot_hole_lvz_strength=0.035,
-        smooth_initial_sigma_m=80.0,
+    grid, model, x_cable_raw, z_cable_raw, metadata = (
+        build_initial_model(
+            model_name=args.initial_model,
+
+            geom_file=geom_file,
+
+            digitized_log_csv=digitized_log_csv,
+
+            x_column=x_column,
+            z_column=z_column,
+
+            dx=dx,
+            dz=dz,
+            dt=None,
+            nt=nt,
+            half_order=half_order,
+            cfl_safety=0.80,
+
+            x_padding_m=x_padding_m,
+            z_max_m=computational_z_max_m,
+            z_padding_bottom_m=0.0,
+
+            z_tie_m=None,
+            anchor_fault_to_cable_end=True,
+            fault_offset_from_cable_m=105.0,
+
+            fault_dip_deg=82.0,
+            fault_dip_sign=-1.0,
+
+            left_block_name="salinian",
+            right_block_name="franciscan",
+
+            # Model-A parameters.
+            # digitized_log disables/replaces the old lateral SAF structure
+            # internally, so these remain relevant only to smooth_prior.
+            initial_cross_fault_contrast=-0.08,
+            initial_cross_fault_transition_m=350.0,
+            initial_fault_zone_width_m=160.0,
+            initial_fault_zone_velocity_reduction=0.14,
+
+            include_pilot_hole_lvz_in_initial=True,
+            initial_pilot_hole_lvz_strength=0.035,
+
+            smooth_initial_sigma_m=80.0,
+        )
     )
 
     expected_bottom_tolerance_m = 0.51 * dz
@@ -2536,6 +2584,9 @@ def main() -> None:
         source_time_mode=np.array("ricker_moment"),
 
         run_tag=np.array(run_tag),
+        initial_model_name=np.array(
+            args.initial_model
+        ),
         n_boundary=np.array(n_boundary),
         gamma_s=np.array(gamma_s),
         free_surface=np.array(free_surface),

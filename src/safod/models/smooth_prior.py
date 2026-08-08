@@ -573,7 +573,7 @@ def _check_elastic_physicality(
 # 4. MAIN BUILDER
 # ==============================================================================
 
-def build_safod_model(
+def build_smooth_prior_model(
     *,
     geom_file: str | Path,
     build_initial_model: bool = True,
@@ -932,7 +932,7 @@ def build_safod_model(
     )
 
     notes = (
-        "SAFOD model built by src.safod_builder. Initial model is a "
+        "SAFOD model built by src.safod.models.smooth_prior. Initial model is a "
         "geologically informed smooth prior: sonic-log-inspired depth trend, "
         "broad Pilot-Hole fractured low-velocity intervals, smooth cross-fault "
         "velocity contrast, and broad SAF low-velocity damage zone. It is not "
@@ -981,3 +981,6 @@ def build_safod_model(
     )
 
     return grid, model, x_cable, z_cable, metadata
+
+# Backward-compatible alias during repository transition.
+build_safod_model = build_smooth_prior_model

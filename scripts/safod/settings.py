@@ -308,3 +308,61 @@ FORWARD_RUN_TAG = forward_run_tag(DEFAULT_THETA_DEG)
 FORWARD_DIR = forward_dir_for_theta(DEFAULT_THETA_DEG)
 FORWARD_PACKAGE = forward_package_for_theta(DEFAULT_THETA_DEG)
 COMPARISON_DIR = comparison_dir_for_theta(DEFAULT_THETA_DEG)
+
+# >>> CANONICAL_EVENT_RESULTS_PATHS >>>
+# Canonical event-centred result layout:
+# results/events/<YYYYMMDD_EVENTNUMBER>/{real,forward,compare}
+
+RESULTS_ROOT = Path("results")
+
+_EVENT_ID_TEXT = str(EVENT["event_id"])
+_EVENT_NUMBER = (
+    _EVENT_ID_TEXT[2:]
+    if _EVENT_ID_TEXT.upper().startswith("NC")
+    else _EVENT_ID_TEXT
+)
+_EVENT_DATE = str(EVENT["origin_time"])[:10].replace("-", "")
+
+EVENT_RESULT_KEY = f"{_EVENT_DATE}_{_EVENT_NUMBER}"
+
+EVENT_RESULTS_DIR = RESULTS_ROOT / "events" / EVENT_RESULT_KEY
+REAL_EVENT_DIR = EVENT_RESULTS_DIR / "real"
+REAL_EVENT_PACKAGE = REAL_EVENT_DIR / "real_das_event_window.npz"
+GEOMETRY_CSV = REAL_EVENT_DIR / "SAFOD_Phase2_projected_from_georef.csv"
+
+FORWARD_EVENT_DIR = EVENT_RESULTS_DIR / "forward"
+COMPARISON_EVENT_DIR = EVENT_RESULTS_DIR / "compare"
+
+
+def theta_dir_name(theta_deg: float) -> str:
+    theta_int = int(round(float(theta_deg)))
+
+    if abs(float(theta_deg) - float(theta_int)) > 1.0e-9:
+        raise ValueError(
+            "Current SAFOD result layout requires integer-degree theta "
+            f"directories; got {theta_deg}."
+        )
+
+    return f"dc{theta_int:03d}"
+
+
+def forward_dir_for_theta(theta_deg: float) -> Path:
+    return FORWARD_EVENT_DIR / theta_dir_name(theta_deg)
+
+
+def forward_package_for_theta(theta_deg: float) -> Path:
+    return (
+        forward_dir_for_theta(theta_deg)
+        / "outputs_safod_initial_forward.npz"
+    )
+
+
+def comparison_dir_for_theta(theta_deg: float) -> Path:
+    return COMPARISON_EVENT_DIR / theta_dir_name(theta_deg)
+
+
+# Compatibility names for older scripts.
+FORWARD_DIR = forward_dir_for_theta(DEFAULT_THETA_DEG)
+FORWARD_PACKAGE = forward_package_for_theta(DEFAULT_THETA_DEG)
+COMPARISON_DIR = comparison_dir_for_theta(DEFAULT_THETA_DEG)
+# <<< CANONICAL_EVENT_RESULTS_PATHS <<<

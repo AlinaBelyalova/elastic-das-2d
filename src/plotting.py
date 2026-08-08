@@ -10,7 +10,7 @@ from src.grid import Grid2D
 from src.model import ElasticModel2D
 
 if TYPE_CHECKING:
-    from src.safod_builder import SafodBuildMetadata
+    from src.safod.models import SafodBuildMetadata
 
 
 _FIELD_LABELS = {

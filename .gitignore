@@ -26,3 +26,12 @@ results/
 # Numba cache
 *.nbc
 *.nbi
+# Local logs and refactor snapshots
+logs/
+refactor_backup/
+
+# Externally supplied raw velocity-model files
+data/safod/velocity_models/zhang_thurber_bedrosian_2009/raw/
+
+# Local scientific velocity-model data and derived products
+data/safod/velocity_models/
