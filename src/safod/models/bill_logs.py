@@ -1,4 +1,4 @@
-# src/safod/models/digitized_log.py
+# src/safod/models/bill_logs.py
 #
 # SAFOD initial elastic model constrained directly by the digitized
 # Ellsworth & Malin (2011) Fig. 3a open-hole Vp/Vs logs.
@@ -300,7 +300,7 @@ def _check_elastic_physicality(
         )
 
 
-def build_digitized_log_model(
+def build_bill_logs_model(
     *,
     geom_file: str | Path,
     log_csv: str | Path,
@@ -695,7 +695,7 @@ def build_digitized_log_model(
         base_metadata,
 
         model_type=(
-            "initial_digitized_ellsworth_malin_2011"
+            "initial_bill_logs_ellsworth_malin_2011"
         ),
 
         cross_fault_contrast=float(
@@ -720,8 +720,8 @@ def build_digitized_log_model(
 
     if verbose:
         print()
-        print("SAFOD digitized-log initial model")
-        print("=================================")
+        print("SAFOD Bill-logs initial model")
+        print("===============================")
 
         print(
             f"log points                 : {len(log)}"
@@ -806,7 +806,7 @@ def build_digitized_log_model(
     )
 
 
-def save_digitized_model_profile_qc(
+def save_bill_logs_profile_qc(
     *,
     grid,
     model,
@@ -1027,4 +1027,10 @@ def save_digitized_model_profile_qc(
 
 
 # Backward-compatible alias during repository transition.
-build_safod_digitized_log_model = build_digitized_log_model
+
+# -----------------------------------------------------------------------------
+# Backward-compatible aliases
+# -----------------------------------------------------------------------------
+build_digitized_log_model = build_bill_logs_model
+save_digitized_model_profile_qc = save_bill_logs_profile_qc
+build_safod_digitized_log_model = build_bill_logs_model
