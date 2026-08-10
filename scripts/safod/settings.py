@@ -33,6 +33,23 @@ GEO_XLSX = Path(
     "SAFOD_Phase2_GeoReferenced_Channels.xlsx"
 )
 
+# ==============================================================================
+# SAFOD GEODETIC / VERTICAL REFERENCE
+# ==============================================================================
+
+# Canonical project SAFOD wellhead coordinate.
+SAFOD_WELLHEAD_LAT_WGS84 = 35.9742039
+SAFOD_WELLHEAD_LON_WGS84 = -120.5521414
+
+# Same project reference point as supplied in NAD27 / UTM zone 10N.
+SAFOD_WELLHEAD_UTM_NAD27_E_M = 720807.06
+SAFOD_WELLHEAD_UTM_NAD27_N_M = 3983663.97
+SAFOD_WELLHEAD_UTM_NAD27_EPSG = 26710
+
+# Ground elevation used by the flat-surface 2-D solver.
+# Solver z=0 is local SAFOD ground surface; z is positive downward.
+SAFOD_SURFACE_ELEVATION_M = 660.46
+
 DAS_UTILITIES_ROOT = Path(
     "/home/groups/ettore88/alina/packages/DAS-utilities"
 )
@@ -93,8 +110,8 @@ EVENTS: dict[str, dict[str, Any]] = {
         # Same physical cable geometry, but June HDF5 rows use a different
         # interrogator registration.  This CSV maps June rows to the unchanged
         # physical MD/TVD/X/Z trajectory.
+        # Relative to the canonical REAL_EVENT_DIR.
         "channel_mapping_csv": (
-            "results/real_event_20260618_75379261/"
             "channel_registration_qc/"
             "mapped_downleg_model_geometry.csv"
         ),
@@ -191,7 +208,7 @@ SELECTED_FILES = resolve_event_input_files(
 
 _mapping_value = ACTIVE_EVENT.get("channel_mapping_csv")
 
-CHANNEL_MAPPING_CSV = (
+CHANNEL_MAPPING_RELATIVE_PATH = (
     Path(_mapping_value)
     if _mapping_value is not None
     else None
@@ -329,6 +346,15 @@ EVENT_RESULTS_DIR = RESULTS_ROOT / "events" / EVENT_RESULT_KEY
 REAL_EVENT_DIR = EVENT_RESULTS_DIR / "real"
 REAL_EVENT_PACKAGE = REAL_EVENT_DIR / "real_das_event_window.npz"
 GEOMETRY_CSV = REAL_EVENT_DIR / "SAFOD_Phase2_projected_from_georef.csv"
+
+# Event-specific interrogator registration lives beside the canonical
+# prepared real-event products.  The registry stores only the path relative
+# to REAL_EVENT_DIR so result-tree migrations cannot leave this path stale.
+CHANNEL_MAPPING_CSV = (
+    REAL_EVENT_DIR / CHANNEL_MAPPING_RELATIVE_PATH
+    if CHANNEL_MAPPING_RELATIVE_PATH is not None
+    else None
+)
 
 FORWARD_EVENT_DIR = EVENT_RESULTS_DIR / "forward"
 COMPARISON_EVENT_DIR = EVENT_RESULTS_DIR / "compare"

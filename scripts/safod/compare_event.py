@@ -26,14 +26,15 @@ from scripts.safod.settings import (
     forward_run_tag,
 )
 from src.signal_processing import bandpass_traces, median_welch_psd
+from src.safod.models import AVAILABLE_INITIAL_MODELS
 
 
 # =============================================================================
 # SETTINGS
 # =============================================================================
 
-INITIAL_MODEL_CHOICES = ("smooth_prior", "digitized_log")
-DEFAULT_INITIAL_MODEL = "digitized_log"
+INITIAL_MODEL_CHOICES = AVAILABLE_INITIAL_MODELS
+DEFAULT_INITIAL_MODEL = "bill_logs"
 
 SYN_DISPLAY_TIME_SHIFT_S = -0.20
 
@@ -267,15 +268,23 @@ def infer_package_model_name(synthetic) -> str:
         )
     ).lower()
 
-    if "digitized" in model_type or "ellsworth" in model_type:
-        return "digitized_log"
+    if "hybrid" in model_type:
+        return "hybrid_zhang2009_bill_logs"
+
+    if "zhang2009" in model_type or "zhang" in model_type:
+        return "zhang2009"
+
+    if (
+        "bill_logs" in model_type
+        or "ellsworth" in model_type
+        or "digitized" in model_type
+    ):
+        return "bill_logs"
 
     if "smooth" in model_type:
         return "smooth_prior"
 
     return ""
-
-
 # =============================================================================
 # FREQUENCY QC
 # =============================================================================

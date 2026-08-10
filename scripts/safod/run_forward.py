@@ -30,6 +30,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from src.safod.models import (
+    AVAILABLE_INITIAL_MODELS,
     build_initial_model,
     fault_x_at_z,
 )
@@ -1591,17 +1592,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--initial-model",
-        choices=(
-            "smooth_prior",
-            "digitized_log",
-        ),
-        default="digitized_log",
+        choices=AVAILABLE_INITIAL_MODELS,
+        default="bill_logs",
         help=(
-            "SAFOD initial velocity model. "
-            "'smooth_prior' reproduces the previous smooth model; "
-            "'digitized_log' uses the digitized "
-            "Ellsworth & Malin (2011) Vp/Vs logs. "
-            "Default: digitized_log."
+            "SAFOD initial velocity model. Available: "
+            + ", ".join(AVAILABLE_INITIAL_MODELS)
+            + ". Default: bill_logs."
         ),
     )
 
@@ -1628,6 +1624,16 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.set_defaults(save_gif=True)
+
+    parser.add_argument(
+        "--nt",
+        type=int,
+        default=12000,
+        help=(
+            "Number of solver time steps. "
+            "Default: 12000."
+        ),
+    )
 
     parser.add_argument(
         "--overwrite",
@@ -1709,7 +1715,13 @@ def main() -> None:
     # The exact duration is printed after grid construction because dt is
     # selected from the CFL condition.
 
-    nt = 12000
+    nt = int(args.nt)
+
+    if nt < 2:
+        raise ValueError(
+            f"--nt must be >= 2; got {nt}."
+        )
+
     half_order = 2
 
     # Boundary configuration selected by the controlled homogeneous sweep.
@@ -1798,10 +1810,17 @@ def main() -> None:
         z_column = "X_2D_m"
 
 
-    digitized_log_csv = Path(
+    bill_logs_csv = Path(
         "data/safod/velocity_models/"
         "ellsworth_malin_2011/"
         "fig3a_digitized.csv"
+    )
+
+    zhang_section_npz = Path(
+        "data/safod/velocity_models/"
+        "zhang_thurber_bedrosian_2009/"
+        "processed/"
+        "zhang2009_safod_section_2d.npz"
     )
 
     grid, model, x_cable_raw, z_cable_raw, metadata = (
@@ -1810,7 +1829,8 @@ def main() -> None:
 
             geom_file=geom_file,
 
-            digitized_log_csv=digitized_log_csv,
+            bill_logs_csv=bill_logs_csv,
+            zhang_section_npz=zhang_section_npz,
 
             x_column=x_column,
             z_column=z_column,
@@ -1837,7 +1857,7 @@ def main() -> None:
             right_block_name="franciscan",
 
             # Model-A parameters.
-            # digitized_log disables/replaces the old lateral SAF structure
+            # bill_logs disables/replaces the old lateral SAF structure
             # internally, so these remain relevant only to smooth_prior.
             initial_cross_fault_contrast=-0.08,
             initial_cross_fault_transition_m=350.0,

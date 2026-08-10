@@ -51,6 +51,9 @@ from scripts.safod.settings import (
     PREP_TMIN_S,
     REAL_EVENT_DIR,
     REAL_EVENT_PACKAGE,
+    SAFOD_SURFACE_ELEVATION_M,
+    SAFOD_WELLHEAD_LAT_WGS84,
+    SAFOD_WELLHEAD_LON_WGS84,
     SELECTED_FILES,
 )
 from src.signal_processing import bandpass_traces
@@ -163,8 +166,8 @@ def fetch_event_from_ncedc() -> dict:
         cat = client.get_events(
             starttime=t0 - 10.0,
             endtime=t0 + 10.0,
-            latitude=35.9741971,
-            longitude=-120.5521278,
+            latitude=SAFOD_WELLHEAD_LAT_WGS84,
+            longitude=SAFOD_WELLHEAD_LON_WGS84,
             maxradius=0.20,
             minmagnitude=0.0,
             maxdepth=20.0,
@@ -420,11 +423,11 @@ def _load_reference_geometry_context() -> dict:
     first_borehole_pos = int(np.flatnonzero(borehole_mask)[0])
     geo_model = geo_down.iloc[first_borehole_pos:].copy()
 
-    # The profile origin and direction are defined once from the unchanged
-    # reference cable, exactly as in the original April workflow.
-    surface = geo.iloc[0]
-    lat0 = float(surface["Lat_WGS84"])
-    lon0 = float(surface["Lon_WGS84"])
+    # The 2-D profile origin is the canonical SAFOD wellhead, not the
+    # first DAS row.  The Surface Spool rows in GEO_XLSX are collapsed to
+    # one MD=TVD=0 coordinate and do not represent a resolved surface path.
+    lat0 = float(SAFOD_WELLHEAD_LAT_WGS84)
+    lon0 = float(SAFOD_WELLHEAD_LON_WGS84)
 
     east_down, north_down = latlon_to_local_enu_m(
         geo_down["Lat_WGS84"].to_numpy(dtype=np.float64),
@@ -568,8 +571,8 @@ def _finalize_channel_mapping(
         + north * context["u_e"]
     )
 
-    out["east_m_from_surface"] = east
-    out["north_m_from_surface"] = north
+    out["east_m_from_wellhead"] = east
+    out["north_m_from_wellhead"] = north
     out["along_profile_m"] = along
     out["cross_profile_m"] = cross
     out["X_2D_m"] = along
@@ -646,7 +649,7 @@ def _finalize_channel_mapping(
         f"{np.nanmax(model_x):.1f} m"
     )
     print(
-        "surface lat/lon            : "
+        "wellhead lat/lon           : "
         f"{context['lat0']:.7f}, "
         f"{context['lon0']:.7f}"
     )
@@ -1521,7 +1524,12 @@ def project_event_to_model(mapping: dict, event_meta: dict) -> dict:
     cross_ev = float(-east_ev * mapping["u_n"] + north_ev * mapping["u_e"])
 
     x_model = along_ev
-    z_model = event_meta["depth_km"] * 1000.0
+
+    # NCEDC reports earthquake depth relative to the geoid (approximately
+    # mean sea level).  The elastic solver uses depth below the local SAFOD
+    # ground surface, so the site elevation must be added.
+    catalog_depth_geoid_m = event_meta["depth_km"] * 1000.0
+    z_model = catalog_depth_geoid_m + SAFOD_SURFACE_ELEVATION_M
 
     print("\nEvent projection into 2D model")
     print("------------------------------")
@@ -1529,17 +1537,30 @@ def project_event_to_model(mapping: dict, event_meta: dict) -> dict:
     print(f"origin                    : {event_meta['origin_time']}")
     print(f"lat/lon/depth             : {event_meta['lat']:.6f}, {event_meta['lon']:.6f}, {event_meta['depth_km']:.3f} km")
     print(f"magnitude                 : M{event_meta['mag']:.2f} {event_meta['mag_type']}")
-    print(f"event east/north from surf: {float(east_ev):.1f}, {float(north_ev):.1f} m")
+    print(f"event east/north wellhead : {float(east_ev):.1f}, {float(north_ev):.1f} m")
     print(f"event along profile       : {along_ev:.1f} m")
     print(f"event crossline distance  : {cross_ev:.1f} m")
     print(f"event model x             : {x_model:.1f} m")
-    print(f"event model z             : {z_model:.1f} m")
+    print(
+        f"catalog geoid depth       : "
+        f"{catalog_depth_geoid_m:.1f} m"
+    )
+    print(
+        f"SAFOD surface elevation   : "
+        f"{SAFOD_SURFACE_ELEVATION_M:.2f} m MSL"
+    )
+    print(
+        f"event model z             : "
+        f"{z_model:.1f} m below solver surface"
+    )
 
     return {
         "event_x_model_m": float(x_model),
         "event_z_model_m": float(z_model),
         "event_along_profile_m": float(along_ev),
         "event_crossline_m": float(cross_ev),
+        "event_depth_geoid_m": float(catalog_depth_geoid_m),
+        "surface_elevation_m": float(SAFOD_SURFACE_ELEVATION_M),
     }
 
 
@@ -1881,6 +1902,30 @@ def main() -> None:
         event_z_model_m=np.array(ev_proj["event_z_model_m"]),
         event_along_profile_m=np.array(ev_proj["event_along_profile_m"]),
         event_crossline_m=np.array(ev_proj["event_crossline_m"]),
+        profile_origin_lat=np.array(mapping["lat0"]),
+        profile_origin_lon=np.array(mapping["lon0"]),
+        profile_u_e=np.array(mapping["u_e"]),
+        profile_u_n=np.array(mapping["u_n"]),
+        profile_azimuth_deg=np.array(
+            (
+                np.rad2deg(
+                    np.arctan2(
+                        mapping["u_e"],
+                        mapping["u_n"],
+                    )
+                )
+                % 360.0
+            )
+        ),
+        event_depth_geoid_m=np.array(ev_proj["event_depth_geoid_m"]),
+        surface_elevation_m=np.array(ev_proj["surface_elevation_m"]),
+        horizontal_origin_definition=np.array(
+            "canonical SAFOD wellhead WGS84"
+        ),
+        vertical_datum_definition=np.array(
+            "NCEDC depth positive downward from geoid; "
+            "solver z positive downward from SAFOD ground surface"
+        ),
         projection_fit_rms_m=np.array(mapping["fit_rms_m"]),
 
         selected_files=np.array(SELECTED_FILES),

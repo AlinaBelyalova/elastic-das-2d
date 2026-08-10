@@ -58,7 +58,12 @@ import pandas as pd
 from pyproj import Geod
 from scipy.interpolate import RegularGridInterpolator
 
-from scripts.safod.settings import GEOMETRY_CSV
+from scripts.safod.settings import (
+    GEOMETRY_CSV,
+    SAFOD_SURFACE_ELEVATION_M,
+    SAFOD_WELLHEAD_LAT_WGS84,
+    SAFOD_WELLHEAD_LON_WGS84,
+)
 
 
 DEFAULT_GRID = Path(
@@ -72,7 +77,7 @@ DEFAULT_OUTPUT_DIR = Path(
     "zhang_thurber_bedrosian_2009"
 )
 
-DEFAULT_SURFACE_ELEVATION_M = 660.46
+DEFAULT_SURFACE_ELEVATION_M = SAFOD_SURFACE_ELEVATION_M
 
 DEFAULT_X_MIN_M = -1100.0
 DEFAULT_X_MAX_M = 2680.0
@@ -150,41 +155,31 @@ def infer_profile_from_geometry(
     geod: Geod,
 ) -> dict:
     """
-    Recover the exact 2-D section line from the prepared physical geometry.
+    Read the exact SAFOD 2-D coordinate frame produced by prepare_event.
 
-    The prepared CSV already stores X_2D_m. We fit the geographic channel
-    positions as a function of X_2D_m and recover:
-      - geographic point corresponding to X_2D=0
-      - section unit vector in east/north coordinates
-
-    This avoids redefining the section orientation.
+    The geographic origin is the canonical SAFOD wellhead.  The profile
+    direction is recovered algebraically from the stored EN/along/cross
+    coordinates, rather than re-fitting a straight line to the borehole.
     """
-    geometry_csv = Path(
-        geometry_csv
-    )
+    geometry_csv = Path(geometry_csv)
 
     if not geometry_csv.exists():
-        raise FileNotFoundError(
-            geometry_csv
-        )
+        raise FileNotFoundError(geometry_csv)
 
-    geo = pd.read_csv(
-        geometry_csv
-    )
+    geo = pd.read_csv(geometry_csv)
 
     required = {
         "X_2D_m",
         "TVD_m",
         "Lat_WGS84",
         "Lon_WGS84",
+        "east_m_from_wellhead",
+        "north_m_from_wellhead",
+        "along_profile_m",
+        "cross_profile_m",
     }
 
-    missing = sorted(
-        required.difference(
-            geo.columns
-        )
-    )
-
+    missing = sorted(required.difference(geo.columns))
     if missing:
         raise ValueError(
             f"Geometry CSV is missing {missing}: {geometry_csv}"
@@ -198,187 +193,101 @@ def infer_profile_from_geometry(
             errors="coerce",
         )
 
-    geo = geo.replace(
-        [np.inf, -np.inf],
-        np.nan,
-    ).dropna(
-        subset=list(required)
+    geo = (
+        geo.replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=list(required))
+        .reset_index(drop=True)
     )
 
     if len(geo) < 10:
-        raise ValueError(
-            "Too few valid geometry rows."
-        )
+        raise ValueError("Too few valid geometry rows.")
 
-    x_model_m = geo[
-        "X_2D_m"
-    ].to_numpy(
+    east = geo["east_m_from_wellhead"].to_numpy(
+        dtype=np.float64
+    )
+    north = geo["north_m_from_wellhead"].to_numpy(
+        dtype=np.float64
+    )
+    along = geo["along_profile_m"].to_numpy(
+        dtype=np.float64
+    )
+    cross = geo["cross_profile_m"].to_numpy(
         dtype=np.float64
     )
 
-    lat = geo[
-        "Lat_WGS84"
-    ].to_numpy(
-        dtype=np.float64
+    # Exact inverse of:
+    #
+    # along = E*u_E + N*u_N
+    # cross = -E*u_N + N*u_E
+    #
+    # The values were written by prepare_event using the common SAFOD frame.
+    denominator = float(
+        np.sum(along ** 2 + cross ** 2)
     )
 
-    lon = geo[
-        "Lon_WGS84"
-    ].to_numpy(
-        dtype=np.float64
-    )
-
-    # Use the first valid geometry point only as a temporary local EN origin.
-    lat_ref = float(
-        lat[0]
-    )
-    lon_ref = float(
-        lon[0]
-    )
-
-    east = np.empty_like(
-        x_model_m
-    )
-    north = np.empty_like(
-        x_model_m
-    )
-
-    for i in range(
-        x_model_m.size
-    ):
-        east[i], north[i] = geodetic_offset_en(
-            geod,
-            lon0=lon_ref,
-            lat0=lat_ref,
-            lon1=float(
-                lon[i]
-            ),
-            lat1=float(
-                lat[i]
-            ),
-        )
-
-    # Geographic line fit:
-    # E(x) = e0 + ue*x
-    # N(x) = n0 + un*x
-    design = np.column_stack(
-        [
-            np.ones_like(
-                x_model_m
-            ),
-            x_model_m,
-        ]
-    )
-
-    coef_e, *_ = np.linalg.lstsq(
-        design,
-        east,
-        rcond=None,
-    )
-
-    coef_n, *_ = np.linalg.lstsq(
-        design,
-        north,
-        rcond=None,
-    )
-
-    e0 = float(
-        coef_e[0]
-    )
-    n0 = float(
-        coef_n[0]
-    )
-
-    direction = np.array(
-        [
-            float(
-                coef_e[1]
-            ),
-            float(
-                coef_n[1]
-            ),
-        ],
-        dtype=np.float64,
-    )
-
-    direction_norm = float(
-        np.linalg.norm(
-            direction
-        )
-    )
-
-    if (
-        not np.isfinite(
-            direction_norm
-        )
-        or direction_norm <= 0.0
-    ):
+    if not np.isfinite(denominator) or denominator <= 0.0:
         raise RuntimeError(
-            "Could not recover SAFOD section direction."
+            "Cannot recover SAFOD profile direction from geometry."
         )
-
-    direction /= direction_norm
 
     u_e = float(
-        direction[0]
+        np.sum(along * east + cross * north)
+        / denominator
     )
+
     u_n = float(
-        direction[1]
+        np.sum(along * north - cross * east)
+        / denominator
     )
 
-    lon0, lat0 = forward_from_en(
-        geod,
-        lon0=lon_ref,
-        lat0=lat_ref,
-        east_m=e0,
-        north_m=n0,
+    norm = float(np.hypot(u_e, u_n))
+
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise RuntimeError(
+            "Recovered SAFOD profile direction is invalid."
+        )
+
+    u_e /= norm
+    u_n /= norm
+
+    # Algebraic reconstruction residual. This is not a fit defining the
+    # section; it only checks consistency of the stored coordinates.
+    east_reconstructed = (
+        along * u_e
+        - cross * u_n
     )
 
-    # Check how well the reconstructed straight line reproduces the
-    # horizontal channel positions.
-    east_pred = (
-        e0
-        + u_e
-        * x_model_m
+    north_reconstructed = (
+        along * u_n
+        + cross * u_e
     )
 
-    north_pred = (
-        n0
-        + u_n
-        * x_model_m
-    )
-
-    horizontal_residual_m = np.hypot(
-        east - east_pred,
-        north - north_pred,
+    residual_m = np.hypot(
+        east - east_reconstructed,
+        north - north_reconstructed,
     )
 
     return {
         "geometry": geo,
-        "lat0": lat0,
-        "lon0": lon0,
-        "u_e": u_e,
-        "u_n": u_n,
+        "lat0": float(SAFOD_WELLHEAD_LAT_WGS84),
+        "lon0": float(SAFOD_WELLHEAD_LON_WGS84),
+        "u_e": float(u_e),
+        "u_n": float(u_n),
         "profile_azimuth_deg": float(
             np.rad2deg(
-                np.arctan2(
-                    u_e,
-                    u_n,
-                )
+                np.arctan2(u_e, u_n)
             )
             % 360.0
         ),
         "horizontal_fit_rms_m": float(
             np.sqrt(
                 np.mean(
-                    horizontal_residual_m ** 2
+                    residual_m ** 2
                 )
             )
         ),
         "horizontal_fit_max_m": float(
-            np.max(
-                horizontal_residual_m
-            )
+            np.max(residual_m)
         ),
     }
 
@@ -1105,8 +1014,8 @@ def main() -> None:
             f"  profile u_E,u_N       : {profile['u_e']:.8f}, "
             f"{profile['u_n']:.8f}",
             f"  profile azimuth       : {profile['profile_azimuth_deg']:.6f} deg",
-            f"  horizontal fit RMS    : {profile['horizontal_fit_rms_m']:.3f} m",
-            f"  horizontal fit max    : {profile['horizontal_fit_max_m']:.3f} m",
+            f"  frame reconstruction RMS: {profile['horizontal_fit_rms_m']:.3f} m",
+            f"  frame reconstruction max: {profile['horizontal_fit_max_m']:.3f} m",
             "",
             "Native Zhang coordinates:",
             f"  origin lat/lon        : {zhang['origin_lat']:.12f}, "
