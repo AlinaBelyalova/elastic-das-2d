@@ -116,6 +116,27 @@ EVENTS: dict[str, dict[str, Any]] = {
             "mapped_downleg_model_geometry.csv"
         ),
     },
+
+    "nc75336682": {
+        "event_id": "NC75336682",
+        "ncedc_event_id": 75336682,
+        "origin_time": "2026-04-01T01:24:18.000000Z",
+        "magnitude": 1.6,
+        "magnitude_type": "Md",
+        "depth_km": 4.4,
+        "event_tag": "20260401_75336682",
+        "input_patterns": [
+            str(
+                SAFOD_EVENT_DATA_ROOT
+                / (
+                    "SAFOD-Deep-10mGL-1000HzFs-2mChDualPulse_"
+                    "2026-04-01T012335Z.h5"
+                )
+            ),
+        ],
+        # April channel numbers already match the reference Excel geometry.
+        "channel_mapping_csv": None,
+    },
 }
 
 
@@ -126,6 +147,10 @@ def normalize_event_key(value: str) -> str:
     aliases = {
         "75336802": "nc75336802",
         "nc75336802": "nc75336802",
+
+        "75336682": "nc75336682",
+        "nc75336682": "nc75336682",
+
         "75379261": "nc75379261",
         "nc75379261": "nc75379261",
     }
