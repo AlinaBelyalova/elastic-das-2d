@@ -1,39 +1,4 @@
 # scripts/safod/plot_das_geophone_two_physical_comparisons.py
-#
-# Final SAFOD DAS / borehole-geophone comparison for NC75336802.
-#
-# Produces TWO physically consistent figures:
-#
-#   1) DAS axial strain        vs MH029 GP1 axial ground velocity
-#      [dimensionless]            [m/s]
-#
-#   2) DAS axial strain rate   vs MH029 GP1 axial ground acceleration
-#      [1/s]                      [m/s^2]
-#
-# The two quantities in each figure are related for a locally plane wave:
-#
-#       epsilon_parallel  ~  - v_parallel / c_app
-#       epsilon_dot       ~  - a_parallel / c_app
-#
-# We DO NOT estimate or apply c_app here. Therefore each observable stays on
-# its own physical y-axis. There is:
-#
-#   - no RMS normalization
-#   - no least-squares amplitude scaling
-#   - no relative time shift
-#   - no correlation-based polarity flip
-#
-# GP1 is used directly because its StationXML orientation is almost parallel
-# to the local fiber direction near physical channel 1694 (dot ~ 0.996).
-#
-# Time axis:
-#
-#       t = absolute UTC sample time - NCEDC catalog origin
-#
-# so x=0 is exactly the earthquake catalog origin for BOTH instruments.
-#
-# Default display window is -0.5 ... 3.5 s, i.e. a 4-s window comparable to
-# a 0...400 sample plot at 100 Hz, but expressed in physical seconds.
 
 from __future__ import annotations
 
@@ -44,16 +9,20 @@ from pathlib import Path
 import sys
 
 import dateutil.parser
+
 import matplotlib
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 from obspy.clients.fdsn.header import FDSNNoDataException
+
 from scipy.integrate import cumulative_trapezoid
-from scipy.signal import butter, detrend, sosfiltfilt
+from scipy.signal import detrend, firwin, lfilter
 from scipy.signal.windows import tukey
 
 
@@ -68,6 +37,7 @@ DAS_UTILITIES_BUILD = DAS_UTILITIES_ROOT / "build"
 DAS_UTILITIES_PYTHON = DAS_UTILITIES_ROOT / "python"
 
 existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
+
 os.environ["LD_LIBRARY_PATH"] = (
     f"{existing_ld}:{DAS_UTILITIES_BUILD}"
     if existing_ld
@@ -85,7 +55,10 @@ import DASutils  # noqa: E402
 # ==============================================================================
 
 EVENT_ID = "NC75336802"
-ORIGIN = UTCDateTime("2026-04-01T04:57:57.470000Z")
+
+ORIGIN = UTCDateTime(
+    "2026-04-01T04:57:57.470000Z"
+)
 
 DAS_FILE = Path(
     "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD_events/"
@@ -97,11 +70,7 @@ GEO_XLSX = Path(
     "SAFOD_Phase2_GeoReferenced_Channels.xlsx"
 )
 
-# Exact colocated DAS channel used for the final comparison.
 DAS_CHANNEL = 1694
-
-# 0 = exact ch.1694 only.
-# Set to 2 if you intentionally want a 5-channel median (1692...1696).
 DAS_MEDIAN_HALF_WINDOW = 0
 
 NETWORK = "SF"
@@ -109,22 +78,38 @@ STATION = "MH029"
 LOCATION = "01"
 GEOPHONE_CHANNEL = "GP1"
 
-# Common final bandwidth for BOTH measurements.
+
+# ==============================================================================
+# Processing
+# ==============================================================================
+
 FMIN_HZ = 1.0
 FMAX_HZ = 20.0
-FILTER_ORDER = 12
 
-# Wider response-removal prefilter for the geophone.
-PREFILT_HZ = (0.2, 0.4, 30.0, 40.0)
+# Odd number -> Type-I linear-phase FIR.
+#
+# Group delay:
+#
+#     (N - 1) / (2 fs)
+#
+# At fs=1000 Hz:
+#
+#     (401 - 1)/(2*1000) = 0.200 s
+#
+FIR_NUMTAPS = 401
 
-# 5% Hann taper on each edge of the full processing trace.
+PREFILT_HZ = (
+    0.2,
+    0.4,
+    30.0,
+    40.0,
+)
+
 EDGE_TAPER_FRACTION = 0.05
 
-# Final display window.
-PLOT_TMIN_S = -0.5
-PLOT_TMAX_S = 2.0
+PLOT_TMIN_S = 0.0
+PLOT_TMAX_S = 1.0
 
-# Optional correlation diagnostic window. Never used to modify the data.
 CORR_TMIN_S = 0.0
 CORR_TMAX_S = 1.0
 
@@ -135,9 +120,15 @@ DEFAULT_OUTPUT_DIR = Path(
 
 DPI = 300
 
+# Poster plotting style
+PLOT_FIGSIZE = (11.2, 3.1)
+DAS_COLOR = "gray"  #"#8C1515"  # Stanford Cardinal
+DAS_LINEWIDTH = 2.0
+GEOPHONE_LINEWIDTH = 1.90
+
 
 # ==============================================================================
-# Generic helpers
+# Helpers
 # ==============================================================================
 
 def parse_beg_time(info) -> UTCDateTime:
@@ -145,13 +136,20 @@ def parse_beg_time(info) -> UTCDateTime:
 
     if isinstance(value, datetime.datetime):
         dt = value
+
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
+            dt = dt.replace(
+                tzinfo=datetime.timezone.utc
+            )
+
         return UTCDateTime(dt)
 
     dt = dateutil.parser.parse(str(value))
+
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=datetime.timezone.utc)
+        dt = dt.replace(
+            tzinfo=datetime.timezone.utc
+        )
 
     return UTCDateTime(dt)
 
@@ -160,8 +158,12 @@ def detrend_demean(
     x: np.ndarray,
     axis: int = -1,
 ) -> np.ndarray:
+
     y = detrend(
-        np.asarray(x, dtype=np.float64),
+        np.asarray(
+            x,
+            dtype=np.float64,
+        ),
         axis=axis,
         type="linear",
     )
@@ -180,12 +182,7 @@ def edge_taper(
     x: np.ndarray,
     axis: int = -1,
 ) -> np.ndarray:
-    """
-    5% Hann-like taper on each end.
 
-    scipy Tukey alpha is the TOTAL tapered fraction, so alpha=0.10 gives
-    approximately 5% at the left edge and 5% at the right edge.
-    """
     y = np.asarray(
         x,
         dtype=np.float64,
@@ -195,7 +192,10 @@ def edge_taper(
 
     window = tukey(
         n,
-        alpha=2.0 * EDGE_TAPER_FRACTION,
+        alpha=(
+            2.0
+            * EDGE_TAPER_FRACTION
+        ),
     )
 
     shape = [1] * y.ndim
@@ -207,11 +207,30 @@ def edge_taper(
     )
 
 
-def zero_phase_bandpass(
+def causal_linear_phase_bandpass(
     x: np.ndarray,
     fs_hz: float,
     axis: int = -1,
 ) -> np.ndarray:
+    """
+    Causal linear-phase FIR bandpass.
+
+    Important properties:
+
+      * one forward pass only
+      * no filtfilt
+      * therefore no backward/acausal filtering
+      * linear phase
+      * constant group delay
+
+    The SAME filter is applied to DAS and MH029.
+    """
+
+    x = np.asarray(
+        x,
+        dtype=np.float64,
+    )
+
     nyquist = (
         0.5
         * float(fs_hz)
@@ -224,26 +243,27 @@ def zero_phase_bandpass(
         < nyquist
     ):
         raise ValueError(
-            f"Invalid band {FMIN_HZ:g}-{FMAX_HZ:g} Hz "
+            f"Invalid band "
+            f"{FMIN_HZ:g}-{FMAX_HZ:g} Hz "
             f"for fs={fs_hz:g} Hz."
         )
 
-    sos = butter(
-        FILTER_ORDER,
+    taps = firwin(
+        FIR_NUMTAPS,
         [
-            FMIN_HZ / nyquist,
-            FMAX_HZ / nyquist,
+            FMIN_HZ,
+            FMAX_HZ,
         ],
-        btype="bandpass",
-        output="sos",
+        pass_zero=False,
+        window="hamming",
+        fs=float(fs_hz),
+        scale=True,
     )
 
-    return sosfiltfilt(
-        sos,
-        np.asarray(
-            x,
-            dtype=np.float64,
-        ),
+    return lfilter(
+        taps,
+        [1.0],
+        x,
         axis=axis,
     )
 
@@ -252,10 +272,12 @@ def zero_lag_corr(
     a: np.ndarray,
     b: np.ndarray,
 ) -> float:
+
     x = np.asarray(
         a,
         dtype=np.float64,
     )
+
     y = np.asarray(
         b,
         dtype=np.float64,
@@ -282,16 +304,11 @@ def component_unit_vector_enu(
     azimuth_deg: float,
     dip_deg: float,
 ) -> np.ndarray:
-    """
-    StationXML convention:
-      azimuth = clockwise from North
-      dip     = degrees down from horizontal
 
-    Returns [East, North, Up].
-    """
     azimuth = np.deg2rad(
         float(azimuth_deg)
     )
+
     dip = np.deg2rad(
         float(dip_deg)
     )
@@ -316,9 +333,7 @@ def component_unit_vector_enu(
 # ==============================================================================
 
 def load_local_fiber_tangent_enu() -> tuple[np.ndarray, dict]:
-    """
-    Central-difference local fiber tangent at physical channel 1694.
-    """
+
     if not GEO_XLSX.exists():
         raise FileNotFoundError(
             GEO_XLSX
@@ -344,7 +359,8 @@ def load_local_fiber_tangent_enu() -> tuple[np.ndarray, dict]:
 
     if missing:
         raise RuntimeError(
-            f"Missing geometry columns: {sorted(missing)}"
+            f"Missing geometry columns: "
+            f"{sorted(missing)}"
         )
 
     channel_numeric = pd.to_numeric(
@@ -354,7 +370,8 @@ def load_local_fiber_tangent_enu() -> tuple[np.ndarray, dict]:
 
     def get_row(channel: int):
         rows = df.loc[
-            channel_numeric == channel
+            channel_numeric
+            == channel
         ]
 
         if len(rows) != 1:
@@ -368,9 +385,11 @@ def load_local_fiber_tangent_enu() -> tuple[np.ndarray, dict]:
     before = get_row(
         DAS_CHANNEL - 1
     )
+
     center = get_row(
         DAS_CHANNEL
     )
+
     after = get_row(
         DAS_CHANNEL + 1
     )
@@ -395,35 +414,22 @@ def load_local_fiber_tangent_enu() -> tuple[np.ndarray, dict]:
         tangent
     )
 
-    return tangent, {
-        "tvd_m": float(
-            center["TVD_m"]
-        ),
-    }
+    return (
+        tangent,
+        {
+            "tvd_m": float(
+                center["TVD_m"]
+            ),
+        },
+    )
 
 
 # ==============================================================================
-# DAS: strain rate AND strain
+# DAS
 # ==============================================================================
 
 def load_das_observables() -> dict:
-    """
-    Read DAS once and return BOTH:
-        axial strain rate [1/s]
-        axial strain      [dimensionless]
 
-    Processing:
-        DASutils strain-rate conversion
-        -> detrend/demean
-        -> 5% edge taper
-
-    Variant B:
-        prepared strain rate -> 1-20 Hz zero-phase filter
-
-    Variant A:
-        prepared strain rate -> time integration -> detrend/demean
-        -> 1-20 Hz zero-phase filter
-    """
     if not DAS_FILE.exists():
         raise FileNotFoundError(
             DAS_FILE
@@ -457,10 +463,6 @@ def load_das_observables() -> dict:
         info
     )
 
-    # --------------------------------------------------------------
-    # True DAS time axis:
-    # absolute UTC sample time - catalog origin.
-    # --------------------------------------------------------------
     time_s = (
         float(
             beg_time
@@ -473,13 +475,11 @@ def load_das_observables() -> dict:
         / fs_hz
     )
 
-    # --------------------------------------------------------------
-    # Select exact channel or an optional small local median.
-    # --------------------------------------------------------------
     i0 = (
         DAS_CHANNEL
         - DAS_MEDIAN_HALF_WINDOW
     )
+
     i1 = (
         DAS_CHANNEL
         + DAS_MEDIAN_HALF_WINDOW
@@ -491,18 +491,23 @@ def load_das_observables() -> dict:
         or i1 > das_data.shape[0]
     ):
         raise RuntimeError(
-            f"DAS channel window [{i0}:{i1}] outside "
+            f"DAS channel window "
+            f"[{i0}:{i1}] outside "
             f"shape {das_data.shape}."
         )
 
-    # Existing SAFOD project convention:
+    # ------------------------------------------------------------------
+    # Existing SAFOD DAS conversion.
     #
-    #     DASutils output * 1e3 -> nm/m/s
+    # DASutils output * 1e3 -> nm/m/s
     #
-    # Convert nm/m/s to SI strain rate [1/s]:
+    # nm/m/s -> m/m/s = 1/s:
     #
     #     * 1e-9
     #
+    # Hence combined factor = 1e-6.
+    # ------------------------------------------------------------------
+
     strain_rate_si_channels = (
         das_data[
             i0:i1,
@@ -523,35 +528,57 @@ def load_das_observables() -> dict:
     )
 
     if DAS_MEDIAN_HALF_WINDOW == 0:
+
         strain_rate_prepared = (
             strain_rate_si_channels[
                 0,
                 :
             ]
         )
+
     else:
+
         strain_rate_prepared = np.median(
             strain_rate_si_channels,
             axis=0,
         )
 
-    # --------------------------------------------------------------
-    # Variant B observable:
-    # band-limited axial strain rate [1/s].
-    # --------------------------------------------------------------
-    strain_rate_filtered = zero_phase_bandpass(
-        strain_rate_prepared,
-        fs_hz,
+    # ------------------------------------------------------------------
+    # Causal, linear-phase filtering.
+    # ------------------------------------------------------------------
+
+    strain_rate_filtered_si = (
+        causal_linear_phase_bandpass(
+            strain_rate_prepared,
+            fs_hz,
+        )
     )
 
-    # --------------------------------------------------------------
-    # Variant A observable:
-    # integrate the prepared strain rate FIRST, then apply the common
-    # final bandpass to axial strain.
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # [1/s] = [m/m/s] -> [um/m/s]
+    #
+    # 1 m = 1e6 um.
+    #
+    # Therefore:
+    #
+    #     1e-6 /s = 1 um/m/s
+    # ------------------------------------------------------------------
+
+    strain_rate_um_per_m_per_s = (
+        strain_rate_filtered_si
+        * 1.0e6
+    )
+
+    # ------------------------------------------------------------------
+    # Strain.
+    # ------------------------------------------------------------------
+
     strain = cumulative_trapezoid(
         strain_rate_prepared,
-        dx=1.0 / fs_hz,
+        dx=(
+            1.0
+            / fs_hz
+        ),
         initial=0.0,
     )
 
@@ -559,40 +586,59 @@ def load_das_observables() -> dict:
         strain
     )
 
-    strain_filtered = zero_phase_bandpass(
-        strain,
-        fs_hz,
+    strain_filtered = (
+        causal_linear_phase_bandpass(
+            strain,
+            fs_hz,
+        )
     )
 
     return {
-        "time_s": time_s,
-        "fs_hz": fs_hz,
+        "time_s": (
+            time_s
+        ),
+
+        "fs_hz": (
+            fs_hz
+        ),
 
         "strain_rate_1_per_s": (
-            strain_rate_filtered
+            strain_rate_filtered_si
+        ),
+
+        "strain_rate_um_per_m_per_s": (
+            strain_rate_um_per_m_per_s
         ),
 
         "strain": (
             strain_filtered
         ),
 
-        "beg_time": beg_time,
+        "beg_time": (
+            beg_time
+        ),
 
         "end_time": (
             beg_time
             + (
-                das_data.shape[1] - 1
+                das_data.shape[1]
+                - 1
             )
             / fs_hz
         ),
 
-        "channel_first": i0,
-        "channel_last": i1 - 1,
+        "channel_first": (
+            i0
+        ),
+
+        "channel_last": (
+            i1 - 1
+        ),
     }
 
 
 # ==============================================================================
-# Geophone: velocity AND acceleration
+# Geophone
 # ==============================================================================
 
 def load_geophone_observables(
@@ -601,30 +647,18 @@ def load_geophone_observables(
     das_fs_hz: float,
     fiber_tangent_enu: np.ndarray,
 ) -> dict:
-    """
-    Return BOTH:
-        GP1 axial ground velocity     [m/s]
-        GP1 axial ground acceleration [m/s^2]
 
-    GP1 is response-corrected to velocity first.
-
-    Variant A:
-        response-corrected velocity -> common 1-20 Hz zero-phase filter
-
-    Variant B:
-        derivative of the SAME band-limited velocity -> acceleration
-
-    No waveform fitting or time shifting is applied.
-    """
     client = Client(
         "https://service.ncedc.org"
     )
 
     seed_id = (
-        f"{NETWORK}.{STATION}.{LOCATION}.{GEOPHONE_CHANNEL}"
+        f"{NETWORK}."
+        f"{STATION}."
+        f"{LOCATION}."
+        f"{GEOPHONE_CHANNEL}"
     )
 
-    # Request margin beyond the full DAS interval for response removal.
     absolute_start = (
         ORIGIN
         + float(
@@ -642,6 +676,7 @@ def load_geophone_observables(
     )
 
     try:
+
         inventory = client.get_stations(
             network=NETWORK,
             station=STATION,
@@ -663,8 +698,10 @@ def load_geophone_observables(
         )
 
     except FDSNNoDataException as exc:
+
         raise RuntimeError(
-            f"No waveform/response available for {seed_id}."
+            f"No waveform/response available "
+            f"for {seed_id}."
         ) from exc
 
     stream.merge(
@@ -680,9 +717,6 @@ def load_geophone_observables(
 
     tr = stream[0].copy()
 
-    # --------------------------------------------------------------
-    # Pre-response preprocessing.
-    # --------------------------------------------------------------
     tr.data = detrend_demean(
         np.asarray(
             tr.data,
@@ -694,9 +728,10 @@ def load_geophone_observables(
         tr.data
     )
 
-    # --------------------------------------------------------------
-    # Counts -> calibrated ground velocity [m/s].
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Counts -> physical ground velocity [m/s].
+    # ------------------------------------------------------------------
+
     tr.remove_response(
         inventory=inventory,
         output="VEL",
@@ -706,9 +741,6 @@ def load_geophone_observables(
         zero_mean=False,
     )
 
-    # --------------------------------------------------------------
-    # Confirm GP1 alignment with local fiber axis.
-    # --------------------------------------------------------------
     orientation = inventory.get_orientation(
         seed_id,
         datetime=ORIGIN,
@@ -738,10 +770,6 @@ def load_geophone_observables(
         )
     )
 
-    # --------------------------------------------------------------
-    # Independent geophone time axis:
-    # absolute UTC sample time - SAME catalog origin.
-    # --------------------------------------------------------------
     geo_time_s = (
         float(
             tr.stats.starttime
@@ -763,12 +791,10 @@ def load_geophone_observables(
         > geo_time_s[-1]
     ):
         raise RuntimeError(
-            f"{seed_id} does not cover the complete DAS UTC interval."
+            f"{seed_id} does not cover "
+            "the complete DAS UTC interval."
         )
 
-    # --------------------------------------------------------------
-    # Interpolate calibrated velocity onto the exact DAS time grid.
-    # --------------------------------------------------------------
     velocity = np.interp(
         das_time_s,
         geo_time_s,
@@ -778,28 +804,48 @@ def load_geophone_observables(
         ),
     )
 
-    # Put positive GP1 in the same geometric direction as the chosen
-    # local fiber tangent. This is coordinate orientation, NOT data fitting.
+    # Same geometric direction as the local fiber.
+    # NOT a correlation-based polarity change.
     if dot_fiber < 0.0:
-        velocity = -velocity
-        dot_fiber = -dot_fiber
 
-    # --------------------------------------------------------------
-    # Variant A observable:
-    # band-limited axial velocity [m/s].
-    # --------------------------------------------------------------
-    velocity_filtered = zero_phase_bandpass(
-        velocity,
-        das_fs_hz,
+        velocity = (
+            -velocity
+        )
+
+        dot_fiber = (
+            -dot_fiber
+        )
+
+    # ------------------------------------------------------------------
+    # EXACT SAME causal linear-phase filter as DAS.
+    # ------------------------------------------------------------------
+
+    velocity_filtered = (
+        causal_linear_phase_bandpass(
+            velocity,
+            das_fs_hz,
+        )
     )
 
-    # --------------------------------------------------------------
-    # Variant B observable:
-    # derivative of the band-limited velocity [m/s^2].
-    # --------------------------------------------------------------
-    acceleration = np.gradient(
+    # ------------------------------------------------------------------
+    # Velocity -> acceleration.
+    # ------------------------------------------------------------------
+
+    acceleration_m_per_s2 = np.gradient(
         velocity_filtered,
-        1.0 / das_fs_hz,
+        (
+            1.0
+            / das_fs_hz
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # m/s^2 -> cm/s^2
+    # ------------------------------------------------------------------
+
+    acceleration_cm_per_s2 = (
+        acceleration_m_per_s2
+        * 100.0
     )
 
     return {
@@ -808,10 +854,16 @@ def load_geophone_observables(
         ),
 
         "acceleration_m_per_s2": (
-            acceleration
+            acceleration_m_per_s2
         ),
 
-        "seed_id": seed_id,
+        "acceleration_cm_per_s2": (
+            acceleration_cm_per_s2
+        ),
+
+        "seed_id": (
+            seed_id
+        ),
 
         "azimuth_deg": float(
             orientation["azimuth"]
@@ -840,18 +892,19 @@ def format_axes(
     ax_left,
     ax_right,
 ) -> None:
+
     ax_left.tick_params(
         axis="both",
-        labelsize=12,
-        width=1.1,
-        length=4,
+        labelsize=11,
+        width=1.0,
+        length=3.5,
     )
 
     ax_right.tick_params(
         axis="y",
-        labelsize=12,
-        width=1.1,
-        length=4,
+        labelsize=11,
+        width=1.0,
+        length=3.5,
     )
 
     for label in (
@@ -863,14 +916,18 @@ def format_axes(
             "bold"
         )
 
-    for spine in ax_left.spines.values():
+    for spine in (
+        ax_left.spines.values()
+    ):
         spine.set_linewidth(
-            1.1
+            1.0
         )
 
-    for spine in ax_right.spines.values():
+    for spine in (
+        ax_right.spines.values()
+    ):
         spine.set_linewidth(
-            1.1
+            1.0
         )
 
 
@@ -878,6 +935,7 @@ def symmetric_ylim(
     ax,
     data: np.ndarray,
 ) -> None:
+
     limit = (
         1.05
         * float(
@@ -898,7 +956,7 @@ def symmetric_ylim(
 
 
 # ==============================================================================
-# Variant A: strain vs velocity
+# Figure 1
 # ==============================================================================
 
 def plot_strain_vs_velocity(
@@ -908,6 +966,7 @@ def plot_strain_vs_velocity(
     velocity: np.ndarray,
     output_path: Path,
 ) -> None:
+
     mask = (
         (time_s >= PLOT_TMIN_S)
         & (time_s <= PLOT_TMAX_S)
@@ -918,25 +977,26 @@ def plot_strain_vs_velocity(
     geo = velocity[mask]
 
     fig, ax1 = plt.subplots(
-        figsize=(11.5, 4.8),
+        figsize=PLOT_FIGSIZE,
     )
 
     line_das, = ax1.plot(
         t,
         das,
-        linewidth=1.55,
-        label="DAS",
+        color=DAS_COLOR,
+        linewidth=DAS_LINEWIDTH,
+        label=f"DAS channel {DAS_CHANNEL}",
     )
 
     ax1.set_xlabel(
         "Time from catalog origin [s]",
-        fontsize=15,
+        fontsize=13,
         fontweight="bold",
     )
 
     ax1.set_ylabel(
-        "Axial strain",
-        fontsize=15,
+        "Axial strain\n[dimensionless]",
+        fontsize=13,
         fontweight="bold",
     )
 
@@ -963,14 +1023,14 @@ def plot_strain_vs_velocity(
     line_geo, = ax2.plot(
         t,
         geo,
-        color="black",
-        linewidth=1.35,
+        color="#940025",
+        linewidth=GEOPHONE_LINEWIDTH,
         label="MH029 GP1 axial velocity",
     )
 
     ax2.set_ylabel(
-        "Axial velocity [m/s]",
-        fontsize=15,
+        "Axial velocity\n[m/s]",
+        fontsize=13,
         fontweight="bold",
     )
 
@@ -1000,10 +1060,11 @@ def plot_strain_vs_velocity(
         ],
         loc="upper right",
         frameon=False,
-        fontsize=11,
+        fontsize=10,
+        handlelength=2.2,
     )
 
-    fig.tight_layout()
+    fig.tight_layout(pad=0.5)
 
     fig.savefig(
         output_path,
@@ -1015,45 +1076,57 @@ def plot_strain_vs_velocity(
 
 
 # ==============================================================================
-# Variant B: strain rate vs acceleration
+# Figure 2
 # ==============================================================================
 
 def plot_strain_rate_vs_acceleration(
     *,
     time_s: np.ndarray,
-    strain_rate: np.ndarray,
-    acceleration: np.ndarray,
+    strain_rate_um_per_m_per_s: np.ndarray,
+    acceleration_cm_per_s2: np.ndarray,
     output_path: Path,
 ) -> None:
+
     mask = (
         (time_s >= PLOT_TMIN_S)
         & (time_s <= PLOT_TMAX_S)
     )
 
     t = time_s[mask]
-    das = strain_rate[mask]
-    geo = acceleration[mask]
+
+    das = (
+        strain_rate_um_per_m_per_s[
+            mask
+        ]
+    )
+
+    geo = (
+        acceleration_cm_per_s2[
+            mask
+        ]
+    )
 
     fig, ax1 = plt.subplots(
-        figsize=(11.5, 4.8),
+        figsize=PLOT_FIGSIZE,
     )
 
     line_das, = ax1.plot(
         t,
         das,
-        linewidth=1.55,
-        label="DAS",
+        color=DAS_COLOR,
+        linewidth=DAS_LINEWIDTH,
+        label=f"DAS channel {DAS_CHANNEL}",
     )
 
     ax1.set_xlabel(
         "Time from catalog origin [s]",
-        fontsize=15,
+        fontsize=13,
         fontweight="bold",
     )
 
     ax1.set_ylabel(
-        r"Axial strain rate [s$^{-1}$]",
-        fontsize=15,
+        "Strain rate\n" + r"[$\mu$m/m/s]",
+        fontsize=13,
         fontweight="bold",
     )
 
@@ -1080,14 +1153,14 @@ def plot_strain_rate_vs_acceleration(
     line_geo, = ax2.plot(
         t,
         geo,
-        color="black",
-        linewidth=1.35,
+        color="#940025",
+        linewidth=GEOPHONE_LINEWIDTH,
         label="MH029 GP1",
     )
 
     ax2.set_ylabel(
-        r"Ground acceleration [m/s$^2$]",
-        fontsize=15,
+        "Axial ground acceleration\n" + r"[cm/s$^2$]",
+        fontsize=13,
         fontweight="bold",
     )
 
@@ -1117,10 +1190,11 @@ def plot_strain_rate_vs_acceleration(
         ],
         loc="upper right",
         frameon=False,
-        fontsize=11,
+        fontsize=10,
+        handlelength=2.2,
     )
 
-    fig.tight_layout()
+    fig.tight_layout(pad=0.5)
 
     fig.savefig(
         output_path,
@@ -1132,14 +1206,15 @@ def plot_strain_rate_vs_acceleration(
 
 
 # ==============================================================================
-# Main
+# Arguments
 # ==============================================================================
 
 def parse_args() -> argparse.Namespace:
+
     parser = argparse.ArgumentParser(
         description=(
-            "Generate the two physically consistent SAFOD DAS / MH029 GP1 "
-            "comparison figures."
+            "Generate SAFOD DAS / MH029 GP1 "
+            "physical comparison figures."
         )
     )
 
@@ -1152,7 +1227,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# ==============================================================================
+# Main
+# ==============================================================================
+
 def main() -> None:
+
     args = parse_args()
 
     args.output_dir.mkdir(
@@ -1167,62 +1247,108 @@ def main() -> None:
     das = load_das_observables()
 
     geo = load_geophone_observables(
-        das_time_s=das["time_s"],
-        das_fs_hz=das["fs_hz"],
-        fiber_tangent_enu=fiber_tangent,
+        das_time_s=(
+            das["time_s"]
+        ),
+        das_fs_hz=(
+            das["fs_hz"]
+        ),
+        fiber_tangent_enu=(
+            fiber_tangent
+        ),
     )
 
-    # --------------------------------------------------------------------------
-    # Optional diagnostics only; nothing is shifted/scaled/flipped from these.
-    # --------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Diagnostic correlation only.
+    # ------------------------------------------------------------------
+
     corr_mask = (
         (das["time_s"] >= CORR_TMIN_S)
         & (das["time_s"] <= CORR_TMAX_S)
     )
 
     corr_strain_velocity = zero_lag_corr(
-        das["strain"][corr_mask],
-        geo["velocity_m_per_s"][corr_mask],
+        das["strain"][
+            corr_mask
+        ],
+        geo["velocity_m_per_s"][
+            corr_mask
+        ],
     )
 
     corr_rate_acceleration = zero_lag_corr(
-        das["strain_rate_1_per_s"][corr_mask],
-        geo["acceleration_m_per_s2"][corr_mask],
+        das[
+            "strain_rate_um_per_m_per_s"
+        ][corr_mask],
+        geo[
+            "acceleration_cm_per_s2"
+        ][corr_mask],
     )
 
-    # --------------------------------------------------------------------------
-    # Figure 1.
-    # --------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Figures.
+    # ------------------------------------------------------------------
+
     fig1_path = (
         args.output_dir
         / "01_das_strain_vs_mh029_gp1_velocity.png"
     )
 
     plot_strain_vs_velocity(
-        time_s=das["time_s"],
-        strain=das["strain"],
-        velocity=geo["velocity_m_per_s"],
-        output_path=fig1_path,
+        time_s=(
+            das["time_s"]
+        ),
+        strain=(
+            das["strain"]
+        ),
+        velocity=(
+            geo["velocity_m_per_s"]
+        ),
+        output_path=(
+            fig1_path
+        ),
     )
 
-    # --------------------------------------------------------------------------
-    # Figure 2.
-    # --------------------------------------------------------------------------
     fig2_path = (
         args.output_dir
         / "02_das_strain_rate_vs_mh029_gp1_acceleration.png"
     )
 
     plot_strain_rate_vs_acceleration(
-        time_s=das["time_s"],
-        strain_rate=das["strain_rate_1_per_s"],
-        acceleration=geo["acceleration_m_per_s2"],
-        output_path=fig2_path,
+        time_s=(
+            das["time_s"]
+        ),
+        strain_rate_um_per_m_per_s=(
+            das[
+                "strain_rate_um_per_m_per_s"
+            ]
+        ),
+        acceleration_cm_per_s2=(
+            geo[
+                "acceleration_cm_per_s2"
+            ]
+        ),
+        output_path=(
+            fig2_path
+        ),
     )
 
-    # --------------------------------------------------------------------------
-    # Save both physical observables.
-    # --------------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Processing delay.
+    # ------------------------------------------------------------------
+
+    fir_group_delay_s = (
+        (FIR_NUMTAPS - 1)
+        / (
+            2.0
+            * das["fs_hz"]
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Save.
+    # ------------------------------------------------------------------
+
     npz_path = (
         args.output_dir
         / "das_geophone_physical_pairs.npz"
@@ -1248,15 +1374,33 @@ def main() -> None:
         ),
 
         das_axial_strain_rate_1_per_s=(
-            das["strain_rate_1_per_s"]
+            das[
+                "strain_rate_1_per_s"
+            ]
+        ),
+
+        das_axial_strain_rate_um_per_m_per_s=(
+            das[
+                "strain_rate_um_per_m_per_s"
+            ]
         ),
 
         gp1_axial_velocity_m_per_s=(
-            geo["velocity_m_per_s"]
+            geo[
+                "velocity_m_per_s"
+            ]
         ),
 
         gp1_axial_acceleration_m_per_s2=(
-            geo["acceleration_m_per_s2"]
+            geo[
+                "acceleration_m_per_s2"
+            ]
+        ),
+
+        gp1_axial_acceleration_cm_per_s2=(
+            geo[
+                "acceleration_cm_per_s2"
+            ]
         ),
 
         das_channel_center=np.array(
@@ -1296,7 +1440,9 @@ def main() -> None:
         ),
 
         gp1_fiber_axis_angle_deg=np.array(
-            geo["fiber_axis_angle_deg"]
+            geo[
+                "fiber_axis_angle_deg"
+            ]
         ),
 
         common_fmin_hz=np.array(
@@ -1305,6 +1451,18 @@ def main() -> None:
 
         common_fmax_hz=np.array(
             FMAX_HZ
+        ),
+
+        fir_numtaps=np.array(
+            FIR_NUMTAPS
+        ),
+
+        fir_group_delay_s=np.array(
+            fir_group_delay_s
+        ),
+
+        common_filter_description=np.array(
+            "causal one-pass linear-phase Hamming FIR bandpass"
         ),
 
         zero_lag_corr_strain_velocity=np.array(
@@ -1316,34 +1474,41 @@ def main() -> None:
         ),
     )
 
+    # ------------------------------------------------------------------
+    # Console.
+    # ------------------------------------------------------------------
+
     print()
-    print("FINAL physical DAS / geophone comparisons")
-    print("==========================================")
-    print(f"event                        : {EVENT_ID}")
-    print(f"catalog origin               : {ORIGIN}")
-    print(f"DAS absolute start           : {das['beg_time']}")
-    print(f"DAS absolute end             : {das['end_time']}")
     print(
-        f"origin in DAS file           : "
-        f"{-float(das['time_s'][0]):.6f} s after file start"
+        "FINAL physical DAS / geophone comparisons"
+    )
+    print(
+        "=========================================="
     )
 
-    if DAS_MEDIAN_HALF_WINDOW == 0:
-        print(
-            f"DAS channel                  : "
-            f"{DAS_CHANNEL}"
-        )
-    else:
-        print(
-            f"DAS median channels          : "
-            f"{das['channel_first']}..{das['channel_last']}"
-        )
+    print(
+        f"event                        : "
+        f"{EVENT_ID}"
+    )
 
     print(
-        f"fiber tangent ENU            : "
-        f"[{fiber_tangent[0]:+.6f}, "
-        f"{fiber_tangent[1]:+.6f}, "
-        f"{fiber_tangent[2]:+.6f}]"
+        f"catalog origin               : "
+        f"{ORIGIN}"
+    )
+
+    print(
+        f"DAS absolute start           : "
+        f"{das['beg_time']}"
+    )
+
+    print(
+        f"DAS absolute end             : "
+        f"{das['end_time']}"
+    )
+
+    print(
+        f"DAS channel                  : "
+        f"{DAS_CHANNEL}"
     )
 
     print(
@@ -1374,32 +1539,69 @@ def main() -> None:
 
     print(
         f"common filter                : "
-        f"{FMIN_HZ:g}-{FMAX_HZ:g} Hz, zero phase"
+        f"{FMIN_HZ:g}-{FMAX_HZ:g} Hz"
     )
 
     print(
-        f"corr(strain, velocity)       : "
+        f"filter                       : "
+        f"causal linear-phase FIR, "
+        f"{FIR_NUMTAPS} taps"
+    )
+
+    print(
+        f"FIR group delay              : "
+        f"{fir_group_delay_s:.3f} s"
+    )
+
+    print(
+        "zero-phase filtering          : "
+        "NO"
+    )
+
+    print(
+        "manual time shift             : "
+        "NONE"
+    )
+
+    print(
+        "DAS strain-rate units         : "
+        "um/m/s"
+    )
+
+    print(
+        "geophone acceleration units   : "
+        "cm/s^2"
+    )
+
+    print(
+        f"corr(strain, velocity)        : "
         f"{corr_strain_velocity:+.4f}"
     )
 
     print(
-        f"corr(strain rate, accel.)    : "
+        f"corr(strain rate, accel.)     : "
         f"{corr_rate_acceleration:+.4f}"
     )
 
     print(
-        "x-axis                       : "
-        "absolute UTC sample time - NCEDC catalog origin"
+        "relative DAS/MH029 shift      : "
+        "NONE"
     )
 
-    print("relative time shift           : NONE")
-    print("normalization                 : NONE")
-    print("amplitude fitting             : NONE")
-    print("correlation-based sign flip   : NONE")
+    print(
+        "normalization                  : "
+        "NONE"
+    )
+
+    print(
+        "amplitude fitting              : "
+        "NONE"
+    )
 
     print()
     print("Saved")
     print("=====")
+
     print(fig1_path)
     print(fig2_path)
     print(npz_path)

@@ -34,9 +34,7 @@ from src.safod.models import AVAILABLE_INITIAL_MODELS
 # =============================================================================
 
 INITIAL_MODEL_CHOICES = AVAILABLE_INITIAL_MODELS
-DEFAULT_INITIAL_MODEL = "bill_logs"
-
-SYN_DISPLAY_TIME_SHIFT_S = -0.20
+DEFAULT_INITIAL_MODEL = "hybrid_zhang2009_boness2006_bill_logs"
 
 TMIN_REAL_S = -0.30
 TMAX_REAL_S = 2.00
@@ -65,6 +63,11 @@ SYN_SIGNAL_TMAX_S = 1.8
 
 PSD_SEGMENT_LENGTH_S = 1.0
 PSD_PLOT_FMAX_HZ = 100.0
+
+PREDICTED_ARRIVAL_COLOR = "#00843D"
+PREDICTED_ARRIVAL_COLOR_LIGHT = "#32CD32"
+PREDICTED_P_LINEWIDTH = 2.7
+PREDICTED_S_LINEWIDTH = 2.5
 
 
 # =============================================================================
@@ -409,7 +412,7 @@ def plot_frequency_qc(
         f_real,
         _relative_db(real_signal_psd, real_signal_peak),
         label="Real event window",
-        linewidth=1.5,
+        linewidth=PREDICTED_P_LINEWIDTH,
     )
     ax0.fill_between(
         f_real,
@@ -429,7 +432,7 @@ def plot_frequency_qc(
         f_syn,
         _relative_db(synthetic_psd, synthetic_peak),
         label=f"Synthetic: {initial_model}",
-        linewidth=1.5,
+        linewidth=PREDICTED_P_LINEWIDTH,
     )
     ax0.fill_between(
         f_syn,
@@ -518,7 +521,11 @@ def add_arrival_overlays(
     light: bool = False,
     include_labels: bool = True,
 ) -> None:
-    colour = "white" if light else "black"
+    colour = (
+        PREDICTED_ARRIVAL_COLOR_LIGHT
+        if light
+        else PREDICTED_ARRIVAL_COLOR
+    )
 
     valid_p = (
         np.isfinite(arrival_channels)
@@ -534,8 +541,8 @@ def add_arrival_overlays(
         arrival_channels[valid_p],
         p_arrivals_s[valid_p] + time_shift_s,
         color=colour,
-        linestyle="--",
-        linewidth=1.5,
+        linestyle=":",
+        linewidth=PREDICTED_P_LINEWIDTH,
         label="Predicted P" if include_labels else None,
         zorder=20,
     )
@@ -544,8 +551,8 @@ def add_arrival_overlays(
         arrival_channels[valid_s],
         s_arrivals_s[valid_s] + time_shift_s,
         color=colour,
-        linestyle=":",
-        linewidth=1.8,
+        linestyle="--",
+        linewidth=PREDICTED_S_LINEWIDTH,
         label="Predicted S" if include_labels else None,
         zorder=20,
     )
@@ -633,6 +640,7 @@ def plot_signed_side_by_side(
     event_id,
     source_f0_hz,
     source_theta_deg,
+    synthetic_display_shift_s,
     initial_model,
     out_path,
 ):
@@ -712,7 +720,7 @@ def plot_signed_side_by_side(
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        time_shift_s=SYN_DISPLAY_TIME_SHIFT_S,
+        time_shift_s=synthetic_display_shift_s,
         include_labels=False,
     )
 
@@ -727,10 +735,7 @@ def plot_signed_side_by_side(
     )
 
     fig.suptitle(
-        f"{event_id} real vs synthetic signed DAS\n"
-        f"f0={source_f0_hz:.1f} Hz, "
-        f"theta={source_theta_deg:.1f} deg, "
-        f"display shift={SYN_DISPLAY_TIME_SHIFT_S:+.2f} s",
+        f"{event_id} real vs synthetic signed DAS",
         y=0.98,
     )
 
@@ -752,6 +757,7 @@ def plot_envelope_side_by_side(
     event_id,
     source_f0_hz,
     source_theta_deg,
+    synthetic_display_shift_s,
     initial_model,
     out_path,
 ):
@@ -832,7 +838,7 @@ def plot_envelope_side_by_side(
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        time_shift_s=SYN_DISPLAY_TIME_SHIFT_S,
+        time_shift_s=synthetic_display_shift_s,
         light=True,
         include_labels=False,
     )
@@ -848,10 +854,7 @@ def plot_envelope_side_by_side(
     )
 
     fig.suptitle(
-        f"{event_id} real vs synthetic DAS envelopes\n"
-        f"{FMIN_COMPARE_HZ:g}-{FMAX_COMPARE_HZ:g} Hz, "
-        f"f0={source_f0_hz:.1f} Hz, "
-        f"theta={source_theta_deg:.1f} deg",
+        f"{event_id} real vs synthetic DAS envelopes",
         y=0.98,
     )
 
@@ -963,6 +966,29 @@ def main() -> None:
             raise ValueError(
                 f"Invalid source_f0_hz: {source_f0_hz}."
             )
+
+        source_time_function_t0_s = float(
+            get_scalar(
+                synthetic,
+                "source_time_function_t0_s",
+                np.nan,
+            )
+        )
+
+        if (
+            not np.isfinite(source_time_function_t0_s)
+            or source_time_function_t0_s < 0.0
+        ):
+            raise RuntimeError(
+                "Synthetic package is missing a valid "
+                "source_time_function_t0_s. Rerun "
+                "scripts.safod.run_forward after saving source.stf.t0 "
+                "into the synthetic NPZ package."
+            )
+
+        # Display-only correction: place the peak of the source-time
+        # function at catalogue origin. No empirical/manual alignment.
+        synthetic_display_shift_s = -source_time_function_t0_s
 
         if not np.isfinite(source_theta_deg):
             raise ValueError("Missing/invalid source_theta_deg.")
@@ -1176,7 +1202,7 @@ def main() -> None:
 
         synthetic_time_display_full = (
             synthetic_time_physical_full
-            + SYN_DISPLAY_TIME_SHIFT_S
+            + synthetic_display_shift_s
         )
 
         syn_mask = (
@@ -1275,6 +1301,7 @@ def main() -> None:
         print(f"initial model            : {args.initial_model}")
         print(f"model type               : {model_type}")
         print(f"source f0                : {source_f0_hz:.2f} Hz")
+        print(f"source STF t0            : {source_time_function_t0_s:.6f} s")
         print(f"source theta             : {source_theta_deg:.2f} deg")
         print(
             "common comparison band   : "
@@ -1306,7 +1333,7 @@ def main() -> None:
         print(f"S arrival range          : {s_min:.3f} to {s_max:.3f} s")
         print(
             f"synthetic display shift  : "
-            f"{SYN_DISPLAY_TIME_SHIFT_S:+.3f} s"
+            f"{synthetic_display_shift_s:+.3f} s"
         )
         print("observed ridge picker    : disabled")
 
@@ -1321,9 +1348,10 @@ def main() -> None:
                     "run_tag": requested_run_tag,
                     "theta_deg": source_theta_deg,
                     "source_f0_hz": source_f0_hz,
+                    "source_time_function_t0_s": source_time_function_t0_s,
                     "common_fmin_hz": FMIN_COMPARE_HZ,
                     "common_fmax_hz": FMAX_COMPARE_HZ,
-                    "synthetic_display_shift_s": SYN_DISPLAY_TIME_SHIFT_S,
+                    "synthetic_display_shift_s": synthetic_display_shift_s,
                     "real_ntraces": int(real_data.shape[0]),
                     "synthetic_ntraces": int(synthetic_data.shape[0]),
                     "real_channel_min": float(np.nanmin(real_channels)),
@@ -1384,6 +1412,7 @@ def main() -> None:
             event_id=event_id,
             source_f0_hz=source_f0_hz,
             source_theta_deg=source_theta_deg,
+            synthetic_display_shift_s=synthetic_display_shift_s,
             initial_model=args.initial_model,
             out_path=signed_comparison,
         )
@@ -1401,6 +1430,7 @@ def main() -> None:
             event_id=event_id,
             source_f0_hz=source_f0_hz,
             source_theta_deg=source_theta_deg,
+            synthetic_display_shift_s=synthetic_display_shift_s,
             initial_model=args.initial_model,
             out_path=envelope_comparison,
         )

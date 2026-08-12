@@ -2600,6 +2600,7 @@ def main() -> None:
 
         source_theta_deg=np.array(source_theta_deg),
         source_f0_hz=np.array(source_f0_hz),
+        source_time_function_t0_s=np.array(float(source.stf.t0)),
         source_scalar_moment=np.array(source_scalar_moment),
         source_time_mode=np.array("ricker_moment"),
 
