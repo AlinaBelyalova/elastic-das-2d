@@ -50,6 +50,11 @@ SAFOD_WELLHEAD_UTM_NAD27_EPSG = 26710
 # Solver z=0 is local SAFOD ground surface; z is positive downward.
 SAFOD_SURFACE_ELEVATION_M = 660.46
 
+# Undamped scientific model extent in the canonical along-profile coordinate.
+# Absorbing layers are appended outside these bounds by run_forward.py.
+SAFOD_SCIENTIFIC_X_MIN_M = -1500.0
+SAFOD_SCIENTIFIC_X_MAX_M = 3500.0
+
 DAS_UTILITIES_ROOT = Path(
     "/home/groups/ettore88/alina/packages/DAS-utilities"
 )

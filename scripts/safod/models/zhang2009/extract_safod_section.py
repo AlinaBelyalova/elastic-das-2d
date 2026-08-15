@@ -60,6 +60,8 @@ from scipy.interpolate import RegularGridInterpolator
 
 from scripts.safod.settings import (
     GEOMETRY_CSV,
+    SAFOD_SCIENTIFIC_X_MAX_M,
+    SAFOD_SCIENTIFIC_X_MIN_M,
     SAFOD_SURFACE_ELEVATION_M,
     SAFOD_WELLHEAD_LAT_WGS84,
     SAFOD_WELLHEAD_LON_WGS84,
@@ -79,9 +81,12 @@ DEFAULT_OUTPUT_DIR = Path(
 
 DEFAULT_SURFACE_ELEVATION_M = SAFOD_SURFACE_ELEVATION_M
 
-DEFAULT_X_MIN_M = -1100.0
-DEFAULT_X_MAX_M = 2680.0
-DEFAULT_Z_MAX_M = 5000.0
+DEFAULT_X_MIN_M = SAFOD_SCIENTIFIC_X_MIN_M
+DEFAULT_X_MAX_M = SAFOD_SCIENTIFIC_X_MAX_M
+# Numerical Zhang sampling extends 500 m below the 5000 m scientific bottom.
+# run_forward.py appends a 600 m bottom sponge to a 5600 m computational grid;
+# Zhang sampling is edge-clipped only across the final 100 m of that sponge.
+DEFAULT_Z_MAX_M = 5500.0
 DEFAULT_DX_M = 5.0
 DEFAULT_DZ_M = 5.0
 
@@ -768,7 +773,8 @@ def main() -> None:
         dzhang_y_ds[0]
     )
 
-    # Solver coordinates.
+    # Extracted numerical-section coordinates. X matches the undamped
+    # scientific profile; depth extends partway into the bottom sponge.
     x_model_m = np.arange(
         args.x_min_m,
         args.x_max_m
@@ -903,6 +909,18 @@ def main() -> None:
             "positive down from MSL; values shallower than -0.5 km clipped "
             "to top physical Zhang node"
         ),
+        horizontal_extent_role=np.array(
+            "undamped scientific SAFOD profile"
+        ),
+        vertical_extent_role=np.array(
+            "Zhang extraction grid; distinct from the scientific and "
+            "computational bottoms in run_forward.py"
+        ),
+        x_min_m=np.array(x_model_m[0], dtype=np.float64),
+        x_max_m=np.array(x_model_m[-1], dtype=np.float64),
+        extraction_z_max_m=np.array(depth_m[-1], dtype=np.float64),
+        dx_m=np.array(args.dx_m, dtype=np.float64),
+        dz_m=np.array(args.dz_m, dtype=np.float64),
         surface_elevation_m=np.array(
             args.surface_elevation_m,
             dtype=np.float64,
@@ -1041,9 +1059,9 @@ def main() -> None:
             f"  top node clipping     : z < {z_top_km:.3f} km -> {z_top_km:.3f} km",
             f"  clipped solver depth  : 0 .. "
             f"{max(0.0, args.surface_elevation_m - 500.0):.2f} m",
-            f"  model bottom Zhang z  : {zhang_depth_km_raw[-1]:.5f} km",
+            f"  extraction bottom Zhang z: {zhang_depth_km_raw[-1]:.5f} km",
             "",
-            "Output section:",
+            "Output extraction grid:",
             f"  x range               : {x_model_m.min():.1f} .. "
             f"{x_model_m.max():.1f} m",
             f"  depth range           : {depth_m.min():.1f} .. "
