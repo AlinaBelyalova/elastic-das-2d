@@ -18,6 +18,9 @@ from .zhang2009 import (
     DEFAULT_ZHANG_SECTION,
     build_zhang2009_model,
 )
+from .hybrid_zhang2009_boness2006_bill_logs_smooth import (
+    build_hybrid_zhang2009_boness2006_bill_logs_smooth_model,
+)
 
 SMOOTH_PRIOR = "smooth_prior"
 BILL_LOGS = "bill_logs"
@@ -27,6 +30,9 @@ ZHANG2009_BONESS2006 = "zhang2009_boness2006"
 HYBRID_ZHANG2009_BONESS2006_BILL_LOGS = (
     "hybrid_zhang2009_boness2006_bill_logs"
 )
+HYBRID_ZHANG2009_BONESS2006_BILL_LOGS_SMOOTH = (
+    "hybrid_zhang2009_boness2006_bill_logs_smooth"
+)
 
 AVAILABLE_INITIAL_MODELS = (
     SMOOTH_PRIOR,
@@ -35,6 +41,7 @@ AVAILABLE_INITIAL_MODELS = (
     HYBRID_ZHANG2009_BILL_LOGS,
     ZHANG2009_BONESS2006,
     HYBRID_ZHANG2009_BONESS2006_BILL_LOGS,
+    HYBRID_ZHANG2009_BONESS2006_BILL_LOGS_SMOOTH,
 )
 
 DEFAULT_BILL_LOGS_CSV = Path(
@@ -107,6 +114,16 @@ def build_initial_model(
 
     if name == HYBRID_ZHANG2009_BONESS2006_BILL_LOGS:
         return build_hybrid_zhang2009_boness2006_bill_logs_model(
+            geom_file=geom_file,
+            bill_logs_csv=bill_logs_csv,
+            boness_log_csv=boness_log_csv,
+            section_npz=zhang_section_npz,
+            build_initial_model=True,
+            **kwargs,
+        )
+
+    if name == HYBRID_ZHANG2009_BONESS2006_BILL_LOGS_SMOOTH:
+        return build_hybrid_zhang2009_boness2006_bill_logs_smooth_model(
             geom_file=geom_file,
             bill_logs_csv=bill_logs_csv,
             boness_log_csv=boness_log_csv,

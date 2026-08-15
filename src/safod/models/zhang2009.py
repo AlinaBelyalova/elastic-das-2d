@@ -149,9 +149,11 @@ def _sample_section_on_grid(
     """
     Sample the extracted Zhang section on the FD grid.
 
-    The extracted section spans the undamped scientific domain. Coordinates
-    outside it are clipped only to provide constant nearest-edge extension
-    into the absorbing side/bottom sponges.
+    In X, the extracted section spans the undamped scientific domain. Its
+    depth sampling currently extends from the surface to 5500 m: 500 m into
+    the 600 m bottom sponge. Computational coordinates outside the extracted
+    section are clipped for constant nearest-edge extension in the remaining
+    absorbing cells.
     """
     interp = RegularGridInterpolator(
         (x_section, z_section),

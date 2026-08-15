@@ -47,6 +47,8 @@ from scipy.interpolate import RegularGridInterpolator
 from scripts.safod.settings import (
     DEFAULT_THETA_DEG,
     REAL_EVENT_PACKAGE,
+    SAFOD_SCIENTIFIC_X_MAX_M,
+    SAFOD_SCIENTIFIC_X_MIN_M,
     forward_dir_for_theta,
     forward_run_tag,
 )
@@ -1729,12 +1731,6 @@ def main() -> None:
     gamma_s = 80.0
     free_surface = True
 
-    # Preserve the physical entrance of the absorbing boundary used by the
-    # original n40 model. Increasing n_boundary must enlarge the grid outward,
-    # not move the sponge into the scientific model domain.
-    baseline_n_boundary = 40
-    baseline_x_padding_m = 800.0
-
     # --------------------------------------------------------------------------
     # Scientific and computational domains
     # --------------------------------------------------------------------------
@@ -1745,34 +1741,33 @@ def main() -> None:
     sponge_width_x_m = n_boundary * dx
     sponge_width_z_m = n_boundary * dz
 
+    scientific_x_min_m = SAFOD_SCIENTIFIC_X_MIN_M
+    scientific_x_max_m = SAFOD_SCIENTIFIC_X_MAX_M
+
+    computational_x_min_m = (
+        scientific_x_min_m
+        - sponge_width_x_m
+    )
+    computational_x_max_m = (
+        scientific_x_max_m
+        + sponge_width_x_m
+    )
+
     computational_z_max_m = (
         scientific_z_max_m
         + sponge_width_z_m
     )
 
-    # Preserve the existing undamped lateral margin.
-    baseline_undamped_side_margin_m = (
-        baseline_x_padding_m
-        - baseline_n_boundary * dx
-    )
-
-    extra_scientific_x_margin_m = 500.0
-
-    # Includes the side sponge outside the scientific domain.
-    x_padding_m = (
-        baseline_undamped_side_margin_m
-        + extra_scientific_x_margin_m
-        + sponge_width_x_m
-    )
-
     print(f"side sponge width          : {sponge_width_x_m:.1f} m")
     print(f"bottom sponge width        : {sponge_width_z_m:.1f} m")
     print(
-        "undamped side margin      : "
-        f"{baseline_undamped_side_margin_m + extra_scientific_x_margin_m:.1f} m"
+        "scientific x              : "
+        f"{scientific_x_min_m:.1f} to {scientific_x_max_m:.1f} m"
     )
-    print(f"extra scientific x margin  : {extra_scientific_x_margin_m:.1f} m")
-    print(f"total x padding            : {x_padding_m:.1f} m")
+    print(
+        "computational x           : "
+        f"{computational_x_min_m:.1f} to {computational_x_max_m:.1f} m"
+    )
     print(f"scientific model bottom    : {scientific_z_max_m:.1f} m")
     print(f"computational grid bottom  : {computational_z_max_m:.1f} m")
 
@@ -1842,7 +1837,8 @@ def main() -> None:
             half_order=half_order,
             cfl_safety=0.80,
 
-            x_padding_m=x_padding_m,
+            x_grid_min_m=computational_x_min_m,
+            x_grid_max_m=computational_x_max_m,
             z_max_m=computational_z_max_m,
             z_padding_bottom_m=0.0,
 
@@ -1884,18 +1880,28 @@ def main() -> None:
             "Check build_safod_model z_max_m/z_padding_bottom_m semantics."
         )
 
-    # Scientific plotting/inversion domain. The side and bottom sponge remain
-    # in the computational arrays but lie outside these limits.
-    scientific_x_min_m = float(
-        grid.x[0] + sponge_width_x_m
-    )
-    scientific_x_max_m = float(
-        grid.x[-1] - sponge_width_x_m
-    )
-
-    if scientific_x_min_m >= scientific_x_max_m:
+    expected_x_tolerance_m = 1.0e-9
+    if (
+        abs(float(grid.x[0]) - computational_x_min_m)
+        > expected_x_tolerance_m
+        or abs(float(grid.x[-1]) - computational_x_max_m)
+        > expected_x_tolerance_m
+        or abs(
+            float(grid.x[0] + sponge_width_x_m)
+            - scientific_x_min_m
+        )
+        > expected_x_tolerance_m
+        or abs(
+            float(grid.x[-1] - sponge_width_x_m)
+            - scientific_x_max_m
+        )
+        > expected_x_tolerance_m
+    ):
         raise RuntimeError(
-            "Scientific x domain is empty after removing side sponge cells."
+            "Unexpected SAFOD x-grid bounds: "
+            f"grid=[{grid.x[0]:.1f}, {grid.x[-1]:.1f}] m, "
+            f"expected=[{computational_x_min_m:.1f}, "
+            f"{computational_x_max_m:.1f}] m."
         )
 
     duration = float((grid.nt - 1) * grid.dt)
@@ -2611,12 +2617,15 @@ def main() -> None:
         n_boundary=np.array(n_boundary),
         gamma_s=np.array(gamma_s),
         free_surface=np.array(free_surface),
-        extra_scientific_x_margin_m=np.array(
-            extra_scientific_x_margin_m
-        ),
-        x_padding_m=np.array(x_padding_m),
+        # Retain legacy keys for readers of older result packages. Padding is
+        # asymmetric under explicit bounds, so no single scalar applies.
+        extra_scientific_x_margin_m=np.array(np.nan),
+        x_padding_m=np.array(np.nan),
+        x_domain_mode=np.array("explicit_scientific_bounds"),
         scientific_x_min_m=np.array(scientific_x_min_m),
         scientific_x_max_m=np.array(scientific_x_max_m),
+        computational_x_min_m=np.array(computational_x_min_m),
+        computational_x_max_m=np.array(computational_x_max_m),
         scientific_z_max_m=np.array(scientific_z_max_m),
         computational_z_max_m=np.array(computational_z_max_m),
         sponge_width_x_m=np.array(sponge_width_x_m),

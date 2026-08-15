@@ -597,6 +597,8 @@ def build_smooth_prior_model(
 
     # Grid padding
     x_padding_m: float = 800.0,
+    x_grid_min_m: float | None = None,
+    x_grid_max_m: float | None = None,
     z_padding_bottom_m: float = 700.0,
     min_x_width_m: float = 2500.0,
     z_max_m: float | None = None,
@@ -642,6 +644,11 @@ def build_smooth_prior_model(
     dt
         If None, choose CFL-safe dt automatically. If provided and too large,
         raise ValueError.
+
+    x_grid_min_m, x_grid_max_m
+        Optional exact endpoints of the complete computational grid. Supply
+        both to bypass the geometry-derived symmetric x padding. If omitted,
+        the existing x_padding_m/min_x_width_m behavior is preserved.
 
     fault_offset_from_cable_m
         Horizontal distance from cable tie point to SAF prior line.
@@ -723,22 +730,89 @@ def build_smooth_prior_model(
         fault_dip_sign=fault_dip_sign,
     )
 
-    x_min_raw = min(float(np.min(x_cable)), float(np.min(x_fault_line))) - x_padding_m
-    x_max_raw = max(float(np.max(x_cable)), float(np.max(x_fault_line))) + x_padding_m
+    explicit_x_bounds = (
+        x_grid_min_m is not None
+        or x_grid_max_m is not None
+    )
 
-    if x_max_raw - x_min_raw < min_x_width_m:
-        x_mid = 0.5 * (x_min_raw + x_max_raw)
-        x_min_raw = x_mid - 0.5 * min_x_width_m
-        x_max_raw = x_mid + 0.5 * min_x_width_m
+    if explicit_x_bounds:
+        if x_grid_min_m is None or x_grid_max_m is None:
+            raise ValueError(
+                "x_grid_min_m and x_grid_max_m must be supplied together."
+            )
 
-    x0_m = math.floor(x_min_raw / dx) * dx
-    x1_m = math.ceil(x_max_raw / dx) * dx
+        x0_m = float(x_grid_min_m)
+        x1_m = float(x_grid_max_m)
+
+        if not np.isfinite(x0_m) or not np.isfinite(x1_m):
+            raise ValueError("Explicit x-grid bounds must be finite.")
+
+        if x1_m <= x0_m:
+            raise ValueError(
+                f"x_grid_max_m must exceed x_grid_min_m; got "
+                f"{x0_m} and {x1_m}."
+            )
+
+        n_x_intervals = (x1_m - x0_m) / dx
+        if not np.isclose(
+            n_x_intervals,
+            round(n_x_intervals),
+            rtol=0.0,
+            atol=1.0e-10,
+        ):
+            raise ValueError(
+                "Explicit x-grid span must contain an integer number of "
+                f"dx intervals; span={x1_m - x0_m}, dx={dx}."
+            )
+
+        if (
+            float(np.min(x_cable)) < x0_m
+            or float(np.max(x_cable)) > x1_m
+        ):
+            raise ValueError(
+                "Cable geometry lies outside the explicit x-grid bounds: "
+                f"cable=[{np.min(x_cable):.3f}, {np.max(x_cable):.3f}] m, "
+                f"grid=[{x0_m:.3f}, {x1_m:.3f}] m."
+            )
+
+        if (
+            float(np.min(x_fault_line)) < x0_m
+            or float(np.max(x_fault_line)) > x1_m
+        ):
+            raise ValueError(
+                "Fault geometry lies outside the explicit x-grid bounds: "
+                f"fault=[{np.min(x_fault_line):.3f}, "
+                f"{np.max(x_fault_line):.3f}] m, "
+                f"grid=[{x0_m:.3f}, {x1_m:.3f}] m."
+            )
+    else:
+        x_min_raw = (
+            min(float(np.min(x_cable)), float(np.min(x_fault_line)))
+            - x_padding_m
+        )
+        x_max_raw = (
+            max(float(np.max(x_cable)), float(np.max(x_fault_line)))
+            + x_padding_m
+        )
+
+        if x_max_raw - x_min_raw < min_x_width_m:
+            x_mid = 0.5 * (x_min_raw + x_max_raw)
+            x_min_raw = x_mid - 0.5 * min_x_width_m
+            x_max_raw = x_mid + 0.5 * min_x_width_m
+
+        x0_m = math.floor(x_min_raw / dx) * dx
+        x1_m = math.ceil(x_max_raw / dx) * dx
 
     nx = int(round((x1_m - x0_m) / dx)) + 1
     nz = int(round((z1_m - z0_m) / dz)) + 1
 
     x = x0_m + np.arange(nx, dtype=np.float64) * dx
     z = z0_m + np.arange(nz, dtype=np.float64) * dz
+
+    if not np.isclose(x[-1], x1_m, rtol=0.0, atol=1.0e-10):
+        raise RuntimeError(
+            f"Constructed x-grid ends at {x[-1]}, expected {x1_m}."
+        )
 
     X, Z = np.meshgrid(x, z, indexing="ij")
 
