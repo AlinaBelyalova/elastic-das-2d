@@ -23,8 +23,18 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 import pandas as pd
+
+# Force pyproj to use the PROJ database installed with the active
+# conda environment. On Sherlock, pyproj's bundled database can be
+# incompatible with the newer libproj loaded from the environment.
+from pyproj import datadir
+
+datadir.set_data_dir(
+    Path(sys.prefix) / "share" / "proj"
+)
 
 from src.safod_deep.catalog import (
     CableGeometry3D,
