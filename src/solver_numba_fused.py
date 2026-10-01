@@ -47,22 +47,70 @@ from src.source_injection import StressSourceInjection
 def fill_velocity_ghosts_free_surface_numba(
     vx: np.ndarray,
     vz: np.ndarray,
+    lam: np.ndarray,
+    l2m: np.ndarray,
+    dx: float,
+    dz: float,
     M: int,
 ) -> None:
     """
-    Free-surface ghost-node velocity fill (Robertsson 1996).
+    Graves (1996) FS1 velocity continuation for the 2-4 staggered grid.
 
-    vx at integer z-nodes → even symmetry about iz=M:
-        vx[:, M-m] = +vx[:, M+m]
+    The planar free surface is colocated with normal-stress nodes at j=M.
+    Graves FS1 determines the velocity values above the surface from the
+    traction-free relations, using centered second-order boundary differences:
 
-    vz at half-integer z-nodes → even symmetry with half-node shift:
-        vz[:, M-m] = +vz[:, M+m-1]
+        Dz(vz)^M = -lambda/(lambda+2mu) * Dx(vx)^M
+
+        [Dz(vx) + Dx(vz)]^(M-1/2)
+            = -[Dz(vx) + Dx(vz)]^(M+1/2)
+
+    For the 2-D x-z system these give the one ghost row required by the
+    fourth-order stress stencil:
+
+        vz[i,M-1] = vz[i,M]
+                    + dz * lambda/l2m * Dx(vx)^M
+
+        vx[i,M-1] = vx[i,M+1]
+                    + dz * (Dx(vz)^(M-1/2) + Dx(vz)^(M+1/2))
+
+    IMPORTANT: this must be called AFTER the interior velocity update so that
+    both interior and ghost velocities are at t=(n+1/2)dt.
+
+    This implementation is intentionally restricted to M=2 (the classical
+    second-order-in-time, fourth-order-in-space "2-4" Graves scheme).
     """
     nx, _ = vx.shape
-    for i in prange(nx):
-        for m in range(1, M + 1):
-            vx[i, M - m] = vx[i, M + m]
-            vz[i, M - m] = vz[i, M + m - 1]
+    k = M
+
+    # sigma_zz = 0 relation: solve for vz one half-grid above the surface.
+    # One extra x index is filled because the vx ghost relation below uses
+    # Dx_plus(vz), which accesses vz[i+1].
+    for i in prange(M, nx - M + 1):
+        dvx_dx_surface = (
+            vx[i, k] - vx[i - 1, k]
+        ) / dx
+
+        vz[i, k - 1] = (
+            vz[i, k]
+            + dz
+            * (lam[i, k] / l2m[i, k])
+            * dvx_dx_surface
+        )
+
+    # sigma_xz = 0 relation: solve for vx one grid point above the surface.
+    for i in prange(M, nx - M):
+        dvz_dx_above = (
+            vz[i + 1, k - 1] - vz[i, k - 1]
+        ) / dx
+        dvz_dx_below = (
+            vz[i + 1, k] - vz[i, k]
+        ) / dx
+
+        vx[i, k - 1] = (
+            vx[i, k + 1]
+            + dz * (dvz_dx_above + dvz_dx_below)
+        )
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -230,7 +278,19 @@ def update_stress_fused_free_surface_numba(
             dvz_dx /= dx
 
             if j == M:
-                dvz_dz = -(lam[i, j] / l2m[i, j]) * dvx_dx
+                # Graves FS1: use a centered second-order vertical derivative
+                # for the horizontal normal stress at the surface. Equation
+                # sigma_zz=0 gives Dz(vz) in terms of the surface Dx(vx).
+                # The horizontal derivative in sxx remains the fourth-order
+                # interior derivative; only the vertical surface derivative
+                # is reduced to second order.
+                dvx_dx_surface_2 = (
+                    vx[i, j] - vx[i - 1, j]
+                ) / dx
+                dvz_dz = (
+                    -(lam[i, j] / l2m[i, j])
+                    * dvx_dx_surface_2
+                )
 
             sxx[i, j] += dt * (l2m[i, j] * dvx_dx + lam[i, j] * dvz_dz)
             szz[i, j] += dt * (lam[i, j] * dvx_dx + l2m[i, j] * dvz_dz)
@@ -245,24 +305,26 @@ def mirror_stress_ghosts_free_surface_numba(
     M: int,
 ) -> None:
     """
-    Free-surface stress ghost-node mirroring (Robertsson 1996).
+    Graves (1996) FS1 stress imaging for the 2-4 staggered grid.
 
-    szz at integer z → odd symmetry:
-        szz[:, M-m] = -szz[:, M+m]
+    With the free surface at normal-stress level k=M:
 
-    sxx at integer z → even symmetry:
-        sxx[:, M-m] = +sxx[:, M+m]
+        szz[k]   = 0
+        szz[k-1] = -szz[k+1]
 
-    sxz at half-integer z → odd symmetry with half-node shift:
-        sxz[:, M-m] = -sxz[:, M+m-1]
+        sxz[k-1] = -sxz[k]
+        sxz[k-2] = -sxz[k+1]
+
+    sxx is not used above an FS1 free surface and is therefore left untouched.
     """
     nx, _ = sxx.shape
+    k = M
+
     for i in prange(nx):
-        szz[i, M] = 0.0
-        for m in range(1, M + 1):
-            szz[i, M - m] = -szz[i, M + m]
-            sxx[i, M - m] =  sxx[i, M + m]
-            sxz[i, M - m] = -sxz[i, M + m - 1]
+        szz[i, k] = 0.0
+        szz[i, k - 1] = -szz[i, k + 1]
+        sxz[i, k - 1] = -sxz[i, k]
+        sxz[i, k - 2] = -sxz[i, k + 1]
 
 
 @njit(fastmath=True, cache=True)
@@ -436,11 +498,15 @@ def run_elastic_solver_numba_fused(
 
     free_surface
     ------------
-    Mirrors the NumPy baseline logic:
-      - top sponge disabled
-      - velocity ghost fill before velocity update
-      - Graves correction at j=M
-      - stress ghost mirroring after stress update
+    Planar Graves (1996) FS1 condition for half_order=2:
+      - top sponge disabled;
+      - interior velocity is advanced first to t=(n+1/2)dt;
+      - FS1 velocity values above the surface are then constructed from the
+        traction-free equations;
+      - the surface horizontal-normal-stress vertical derivative is second
+        order, while the interior remains fourth order;
+      - szz=0 and the required stress antisymmetries are imposed after source
+        injection, before the state is carried to the next step.
 
     source_injection
     ----------------
@@ -487,6 +553,12 @@ def run_elastic_solver_numba_fused(
     courant_rep = float(vp.mean()) * dt / dx
     a = fd_coefficients(half_order, use_ts_sfd=use_ts_sfd, courant=courant_rep)
     M = len(a)
+
+    if free_surface and M != 2:
+        raise NotImplementedError(
+            "Graves FS1 is currently implemented only for half_order=2 "
+            "(the classical 2-4 staggered-grid scheme)."
+        )
 
     dt_max = max_stable_dt(
         float(vp.max()), dx, dz, half_order, safety=1.0, use_ts_sfd=use_ts_sfd
@@ -599,21 +671,26 @@ def run_elastic_solver_numba_fused(
 
     # ── leapfrog time loop ─────────────────────────────────────────────────────
     for it in range(nt):
-        # 0. Free-surface ghost-node velocity fill
-        if free_surface:
-            fill_velocity_ghosts_free_surface_numba(vx, vz, M)
-
         # 1. Velocity update: sigma^n -> v^(n+1/2)
         update_velocity_fused_numba(
             vx, vz, sxx, szz, sxz, bx, bz, dx, dz, dt, a
         )
 
-        # 2. Stress update: v^(n+1/2) -> sigma^(n+1)
+        # 1b. Graves FS1 velocity continuation at the NEW half time level.
+        #
+        # The fourth-order stress stencil needs velocity values immediately
+        # above the surface. Construct them from v^(n+1/2), not from the stale
+        # v^(n-1/2) state.
+        if free_surface:
+            fill_velocity_ghosts_free_surface_numba(
+                vx, vz, lam, l2m, dx, dz, M
+            )
+
+        # 2. Stress update: v^(n+1/2) -> sigma^(n+1), before source
         if free_surface:
             update_stress_fused_free_surface_numba(
                 vx, vz, sxx, szz, sxz, lam, l2m, mu_xz, dx, dz, dt, a
             )
-            mirror_stress_ghosts_free_surface_numba(sxx, szz, sxz, M)
         else:
             update_stress_fused_numba(
                 vx, vz, sxx, szz, sxz, lam, l2m, mu_xz, dx, dz, dt, a
@@ -628,6 +705,12 @@ def run_elastic_solver_numba_fused(
             stf_zz[it] * src_scale,
             stf_xz[it] * src_scale,
         )
+
+        # 3b. Enforce/image the complete post-source stress state.
+        if free_surface:
+            mirror_stress_ghosts_free_surface_numba(
+                sxx, szz, sxz, M
+            )
 
         # 4. Sponge damping
         apply_sponge_numba(vx, vz, sxx, szz, sxz, sponge)

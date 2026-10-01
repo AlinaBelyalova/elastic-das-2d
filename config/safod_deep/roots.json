@@ -41,6 +41,12 @@
       "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-05/01_nosppol_10kHz_2026-05-01T041000Z",
       "priority": 70,
       "notes": "Final May configuration; no reference spool; fs 1000 Hz; detector noise suppression off."
+    },
+    {
+      "label": "2026-06_nano",
+      "path": "/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-06-Nano",
+      "priority": 80,
+      "notes": "Nano HDF5, June-August 2026; processed by Ettore."
     }
   ]
 }

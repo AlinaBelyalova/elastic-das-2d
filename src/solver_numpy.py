@@ -41,10 +41,14 @@
 # Free surface (free_surface=True)
 #   Physical surface at z = M*h (array index iz=M). The first M z-nodes
 #   (iz=0..M-1) are ghost nodes (air). Top sponge is disabled.
-#   Implementation: Robertsson (1996) image method + Graves (1996) correction.
-#     - velocity ghost nodes extrapolated before each velocity update
-#     - dvz_dz at surface overwritten to enforce σ_zz = 0 analytically
-#     - stress ghost nodes set by mirror symmetry after each stress update
+#   Implementation: planar Graves (1996) FS1 for the 2-4 scheme.
+#     - interior velocity is advanced to the new half time first
+#     - velocity values above the surface are then obtained from the
+#       second-order traction-free boundary equations
+#     - the vertical derivative entering horizontal normal stress at the
+#       surface is second-order
+#     - szz=0 and the required stress antisymmetries are imposed after source
+#       injection
 #   Moment-tensor sources must satisfy source_iz >= M+1: a source at iz=M
 #   would inject into szz at the free surface, violating σ_zz = 0.
 #
@@ -442,6 +446,12 @@ def run_elastic_solver_numpy(
     a = fd_coefficients(half_order, use_ts_sfd=use_ts_sfd, courant=courant_rep)
     M = len(a)
 
+    if free_surface and M != 2:
+        raise NotImplementedError(
+            "Graves FS1 is currently implemented only for half_order=2 "
+            "(the classical 2-4 staggered-grid scheme)."
+        )
+
     dt_max = max_stable_dt(
         float(vp.max()), dx, dz, half_order, safety=1.0, use_ts_sfd=use_ts_sfd
     )
@@ -526,12 +536,6 @@ def run_elastic_solver_numpy(
     ix, iz = source_ix, source_iz
 
     for it in range(nt):
-        # 0. Free-surface ghost-node velocity fill
-        if free_surface:
-            for m in range(1, M + 1):
-                state.vx[:, M - m] = state.vx[:, M + m]
-                state.vz[:, M - m] = state.vz[:, M + m - 1]
-
         # 1. Velocity update: sigma^n -> v^(n+1/2)
         state.vx += dt * bx * (
             D_plus_x(state.sxx, a, dx) + D_minus_z(state.sxz, a, dz)
@@ -540,25 +544,62 @@ def run_elastic_solver_numpy(
             D_minus_x(state.sxz, a, dx) + D_plus_z(state.szz, a, dz)
         )
 
-        # 2. Stress update: v^(n+1/2) -> sigma^(n+1)
+        # 1b. Graves FS1 velocity continuation at t_v[n].
+        if free_surface:
+            k = M
+
+            # Normal-traction condition at the surface.
+            i_vz = slice(M, nx - M + 1)
+            dvx_dx_surface = (
+                state.vx[M:nx - M + 1, k]
+                - state.vx[M - 1:nx - M, k]
+            ) / dx
+
+            state.vz[i_vz, k - 1] = (
+                state.vz[i_vz, k]
+                + dz
+                * (lam[i_vz, k] / l2m[i_vz, k])
+                * dvx_dx_surface
+            )
+
+            # Shear-traction condition across the surface.
+            i_vx = slice(M, nx - M)
+            dvz_dx_above = (
+                state.vz[M + 1:nx - M + 1, k - 1]
+                - state.vz[M:nx - M, k - 1]
+            ) / dx
+            dvz_dx_below = (
+                state.vz[M + 1:nx - M + 1, k]
+                - state.vz[M:nx - M, k]
+            ) / dx
+
+            state.vx[i_vx, k - 1] = (
+                state.vx[i_vx, k + 1]
+                + dz * (dvz_dx_above + dvz_dx_below)
+            )
+
+        # 2. Stress update: v^(n+1/2) -> sigma^(n+1), before source
         dvx_dx = D_minus_x(state.vx, a, dx)
         dvz_dz = D_minus_z(state.vz, a, dz)
 
         if free_surface:
-            dvz_dz[:, M] = -(lam[:, M] / l2m[:, M]) * dvx_dx[:, M]
+            # Graves FS1 uses a second-order vertical derivative for the
+            # horizontal normal stress at the surface. From sigma_zz=0:
+            i_fs = slice(M, nx - M)
+            dvx_dx_surface_2 = (
+                state.vx[M:nx - M, M]
+                - state.vx[M - 1:nx - M - 1, M]
+            ) / dx
+            dvz_dz[i_fs, M] = (
+                -(lam[i_fs, M] / l2m[i_fs, M])
+                * dvx_dx_surface_2
+            )
 
         state.sxx += dt * (l2m * dvx_dx + lam * dvz_dz)
         state.szz += dt * (lam * dvx_dx + l2m * dvz_dz)
         state.sxz += dt * mu_xz * (
             D_plus_z(state.vx, a, dz) + D_plus_x(state.vz, a, dx)
         )
-
-        if free_surface:
-            state.szz[:, M] = 0.0
-            for m in range(1, M + 1):
-                state.szz[:, M - m] = -state.szz[:, M + m]
-                state.sxx[:, M - m] = state.sxx[:, M + m]
-                state.sxz[:, M - m] = -state.sxz[:, M + m - 1]
 
         # 3. Source injection into updated stress at t_sigma[it+1]
         state.sxx[ix, iz] += stf_xx[it] * src_scale
@@ -569,6 +610,14 @@ def run_elastic_solver_numpy(
         state.sxz[ix - 1, iz] += amp_xz
         state.sxz[ix, iz - 1] += amp_xz
         state.sxz[ix - 1, iz - 1] += amp_xz
+
+        # 3b. Graves FS1 stress imaging after the source has been added.
+        if free_surface:
+            k = M
+            state.szz[:, k] = 0.0
+            state.szz[:, k - 1] = -state.szz[:, k + 1]
+            state.sxz[:, k - 1] = -state.sxz[:, k]
+            state.sxz[:, k - 2] = -state.sxz[:, k + 1]
 
         # 4. Sponge damping
         state.vx *= sponge
