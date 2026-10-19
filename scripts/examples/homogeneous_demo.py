@@ -1,5 +1,5 @@
 # ==============================================================================
-# scripts/run_homogeneous_demo.py
+# scripts/examples/homogeneous_demo.py
 #
 # Homogeneous validation/demo script for the 2D elastic + DAS pipeline.
 #
@@ -32,13 +32,13 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 from scipy.signal import hilbert
 
-from src.grid import Grid2D
-from src.model import ElasticModel2D
-from src.source import build_dc_source, EmbeddedSource2D
-from src.receivers import build_das_cable, Receivers2D
-from src.simulator import run_forward_simulation
-from src.sampling import build_receiver_sampling
-from src.solver_numpy import run_elastic_solver_numpy, max_stable_dt
+from src.common.grid import Grid2D
+from src.common.model import ElasticModel2D
+from src.elastic.source import build_dc_source, EmbeddedSource2D
+from src.das.receivers import build_das_cable, Receivers2D
+from src.elastic.simulator import run_forward_simulation
+from src.elastic.sampling import build_receiver_sampling
+from src.elastic.solver_numpy import run_elastic_solver_numpy, max_stable_dt
 
 
 # ==============================================================================
@@ -606,7 +606,7 @@ def main() -> None:
     snapshot_stride = 100
     gauge_length_m = 20.0
 
-    out_dir = Path("results/run_homogeneous_demo_bilinear_free_surface")
+    out_dir = Path("results/examples/homogeneous_demo")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Building model and geometry...")

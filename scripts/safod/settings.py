@@ -246,34 +246,13 @@ CHANNEL_MAPPING_RELATIVE_PATH = (
 
 
 # ==============================================================================
-# PREPARED REAL EVENT
-# ==============================================================================
-
-REAL_EVENT_DIR = Path(
-    f"results/real_event_{EVENT_TAG}"
-)
-
-REAL_EVENT_PACKAGE = (
-    REAL_EVENT_DIR
-    / "real_das_event_window.npz"
-)
-
-# Event-specific geometry exported by prepare_event.py and consumed by
-# run_forward.py / compare_event.py.
-GEOMETRY_CSV = (
-    REAL_EVENT_DIR
-    / "SAFOD_Phase2_projected_from_georef.csv"
-)
-
-
-# ==============================================================================
 # REAL-DATA PREPARATION / COMMON COMPARISON FILTER
 # ==============================================================================
 
 PREP_TMIN_S = -2.0
 PREP_TMAX_S = 15.0
 
-COMMON_FMIN_HZ = 1.0
+COMMON_FMIN_HZ = 0.0
 COMMON_FMAX_HZ = 20.0
 FILTER_ORDER = 4
 FILTER_TAPER_FRAC = 0.05
@@ -285,14 +264,6 @@ FILTER_TAPER_FRAC = 0.05
 
 DEFAULT_THETA_DEG = 35.0
 FORWARD_BASE_TAG = "n120_g80_xplus500"
-
-FORWARD_ROOT = Path(
-    f"results/forward_real_event_{EVENT_TAG}"
-)
-
-COMPARISON_ROOT = Path(
-    f"results/compare_real_synthetic_{EVENT_TAG}"
-)
 
 
 def format_theta_tag(theta_deg: float) -> str:
@@ -330,31 +301,8 @@ def forward_run_tag(theta_deg: float) -> str:
     )
 
 
-def forward_dir_for_theta(theta_deg: float) -> Path:
-    return (
-        FORWARD_ROOT
-        / f"dc{format_theta_tag(theta_deg)}"
-    )
-
-
-def forward_package_for_theta(theta_deg: float) -> Path:
-    return (
-        forward_dir_for_theta(theta_deg)
-        / "outputs_safod_initial_forward.npz"
-    )
-
-
-def comparison_dir_for_theta(theta_deg: float) -> Path:
-    return (
-        COMPARISON_ROOT
-        / f"dc{format_theta_tag(theta_deg)}"
-    )
-
 
 FORWARD_RUN_TAG = forward_run_tag(DEFAULT_THETA_DEG)
-FORWARD_DIR = forward_dir_for_theta(DEFAULT_THETA_DEG)
-FORWARD_PACKAGE = forward_package_for_theta(DEFAULT_THETA_DEG)
-COMPARISON_DIR = comparison_dir_for_theta(DEFAULT_THETA_DEG)
 
 # >>> CANONICAL_EVENT_RESULTS_PATHS >>>
 # Canonical event-centred result layout:

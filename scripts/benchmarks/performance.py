@@ -6,12 +6,12 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 
-from src.grid import Grid2D
-from src.model import ElasticModel2D
-from src.source import build_dc_source
-from src.receivers import build_das_cable
-from src.simulator import run_forward_simulation
-from src.solver_numpy import max_stable_dt
+from src.common.grid import Grid2D
+from src.common.model import ElasticModel2D
+from src.elastic.source import build_dc_source
+from src.das.receivers import build_das_cable
+from src.elastic.simulator import run_forward_simulation
+from src.elastic.solver_numpy import max_stable_dt
 
 
 # ==============================================================================
@@ -393,8 +393,8 @@ def generate_plots(data: dict[str, np.ndarray], outdir: Path) -> None:
 # ==============================================================================
 
 def main() -> None:
-    outdir_data = Path("results/scaling")
-    outdir_figs = Path("results/final_figures")
+    outdir_data = Path("results/benchmarks/performance")
+    outdir_figs = Path("results/benchmarks/performance")
     outdir_data.mkdir(parents=True, exist_ok=True)
     outdir_figs.mkdir(parents=True, exist_ok=True)
 

@@ -25,7 +25,7 @@ from scripts.safod.settings import (
     forward_package_for_theta,
     forward_run_tag,
 )
-from src.signal_processing import bandpass_traces, median_welch_psd
+from src.common.signal_processing import bandpass_traces, median_welch_psd
 from src.safod.models import AVAILABLE_INITIAL_MODELS
 
 

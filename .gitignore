@@ -1,5 +1,6 @@
-# Python cache
+# Python and test caches
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 
@@ -14,7 +15,8 @@ env/
 notebooks/.ipynb_checkpoints/
 
 # Results and generated outputs
-results/
+results/*
+!results/README.md
 *.npz
 *.npy
 *.gif
@@ -26,9 +28,6 @@ results/
 # Numba cache
 *.nbc
 *.nbi
-# Local logs and refactor snapshots
-logs/
-refactor_backup/
 
 # Externally supplied raw velocity-model files
 data/safod/velocity_models/zhang_thurber_bedrosian_2009/raw/
@@ -36,6 +35,5 @@ data/safod/velocity_models/zhang_thurber_bedrosian_2009/raw/
 # Local scientific velocity-model data and derived products
 data/safod/velocity_models/
 
-# Local project documentation and archived code
-docs/
-archive/
+# Private handoff notes (kept out of the repository since commit b61b7d5)
+docs/history/

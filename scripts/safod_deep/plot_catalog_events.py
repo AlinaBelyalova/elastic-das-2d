@@ -46,6 +46,9 @@ sys.path.insert(0, str(DAS_UTILITIES_BUILD))
 sys.path.insert(0, str(DAS_UTILITIES_PYTHON))
 import DASutils  # noqa: E402
 
+from src.safod.models import build_initial_model  # noqa: E402
+from src.safod.models.zhang2009 import DEFAULT_ZHANG_SECTION  # noqa: E402
+
 DEFAULT_CATALOG = Path("results/safod_deep/catalog/catalog_recorded.csv")
 DEFAULT_MANIFEST = Path("results/safod_deep/catalog/recording_manifest.csv")
 DEFAULT_OUTPUT_DIR = Path("results/safod_deep/event_qc")
@@ -53,6 +56,16 @@ DEFAULT_GEOMETRY_DIR = Path("results/safod_deep/geometry")
 GEO_XLSX = Path(
     "/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx"
 )
+
+# Keep these pure geometry/datum constants local instead of importing
+# scripts.safod.settings: that module resolves the currently configured HDF5
+# event at import time and would couple the catalogue plotter to one event.
+# Values must stay synchronized with scripts/safod/settings.py.
+SAFOD_WELLHEAD_LAT_WGS84 = 35.9742039
+SAFOD_WELLHEAD_LON_WGS84 = -120.5521414
+SAFOD_SURFACE_ELEVATION_M = 660.46
+SAFOD_SCIENTIFIC_X_MIN_M = -1500.0
+SAFOD_SCIENTIFIC_X_MAX_M = 3500.0
 
 REGISTRY_NAME = "acquisition_registration.json"
 REGISTRY_QC_NAME = "acquisition_registration_qc.png"
@@ -62,6 +75,25 @@ DEFAULT_DISPLAY_TMIN_S = -0.5
 DEFAULT_PCLIP = 96.0
 DEFAULT_DPI = 180
 MAX_DISPLAY_FS_HZ = 500.0
+
+# P/S first-arrival overlays.  The preferred path uses Ettore Biondi's
+# EikoHypoTomo wrapper (which calls pykonal internally) on the actual SAFOD
+# velocity models.  The straight-ray calculation is retained only as a robust
+# fallback for catalogue events outside the available eikonal model domains.
+EIKO_HYPO_TOMO_ROOT = Path(
+    "/home/groups/ettore88/alina/packages/EikoHypoTomo"
+)
+EIKO_HYPO_TOMO_PYTHON = EIKO_HYPO_TOMO_ROOT / "python"
+EIKO_GENERIC_SOLVER_PYTHON = (
+    EIKO_HYPO_TOMO_ROOT / "external/python-solver/GenericSolver/python"
+)
+DEFAULT_PHASE_MODEL_NAME = "hybrid_zhang2009_boness2006_bill_logs_smooth"
+DEFAULT_PHASE_GRID_SPACING_M = 10.0
+DEFAULT_PHASE_LOCAL_Z_MAX_M = 5000.0
+DEFAULT_P_GUIDE_VELOCITY_KM_S = 5.5
+DEFAULT_S_GUIDE_VELOCITY_KM_S = 3.2
+DEFAULT_PHASE_PRE_S = 1.5
+DEFAULT_PHASE_POST_S = 3.0
 
 DEFAULT_CALIBRATION_ATTEMPTS = 8
 DEFAULT_TARGET_CALIBRATIONS = 3
@@ -131,6 +163,64 @@ class RegisteredAxis:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class EikonalPhaseModel:
+    name: str
+    label: str
+    x_m: np.ndarray
+    z_m: np.ndarray
+    vp_mps: np.ndarray
+    vs_mps: np.ndarray
+
+
+@dataclass(frozen=True)
+class PhaseGuideGeometry:
+    fibre_distance_m: np.ndarray
+    receiver_x_m: np.ndarray
+    receiver_z_m: np.ndarray
+    profile_u_e: float
+    profile_u_n: float
+
+
+@dataclass(frozen=True)
+class PhaseGuideContext:
+    geometry: PhaseGuideGeometry
+    eikonal_models: tuple[EikonalPhaseModel, ...]
+    eikonal_error: str | None = None
+
+
+@dataclass(frozen=True)
+class PhaseTravelTimeGuide:
+    fibre_distance_m: np.ndarray
+    p_time_s: np.ndarray
+    s_time_s: np.ndarray
+    method: str
+    model_name: str
+    model_label: str
+    source_x_m: float
+    source_z_m: float
+    grid_dx_m: float = float("nan")
+    grid_dz_m: float = float("nan")
+    fallback_vp_km_s: float = float("nan")
+    fallback_vs_km_s: float = float("nan")
+
+    @property
+    def p_min_s(self) -> float:
+        return float(np.nanmin(self.p_time_s))
+
+    @property
+    def p_max_s(self) -> float:
+        return float(np.nanmax(self.p_time_s))
+
+    @property
+    def s_min_s(self) -> float:
+        return float(np.nanmin(self.s_time_s))
+
+    @property
+    def s_max_s(self) -> float:
+        return float(np.nanmax(self.s_time_s))
+
+
 def finite_float(value: Any, default: float = np.nan) -> float:
     try:
         x = float(value)
@@ -185,6 +275,630 @@ def robust_clip(data: np.ndarray, percentile: float) -> float:
     if not np.isfinite(clip) or clip <= 0.0:
         clip = float(np.max(np.abs(data)))
     return clip if np.isfinite(clip) and clip > 0.0 else 1.0
+
+
+def infer_wellhead_elevation_m(
+    event_row: pd.Series,
+    fallback_m: float | None = None,
+) -> float:
+    """Recover the vertical datum used by the catalog when possible."""
+    closest_elev = finite_float(
+        event_row.get("closest_cable_elevation_m", np.nan)
+    )
+    closest_tvd = finite_float(
+        event_row.get("closest_cable_tvd_m", np.nan)
+    )
+    if np.isfinite(closest_elev) and np.isfinite(closest_tvd):
+        return float(closest_elev + closest_tvd)
+
+    explicit = finite_float(event_row.get("wellhead_elevation_m", np.nan))
+    if np.isfinite(explicit):
+        return float(explicit)
+
+    if fallback_m is not None and np.isfinite(float(fallback_m)):
+        return float(fallback_m)
+
+    return float(SAFOD_SURFACE_ELEVATION_M)
+
+
+def _latlon_to_local_en_m(
+    latitude: np.ndarray | float,
+    longitude: np.ndarray | float,
+) -> tuple[np.ndarray, np.ndarray]:
+    latitude = np.asarray(latitude, dtype=np.float64)
+    longitude = np.asarray(longitude, dtype=np.float64)
+    earth_radius_m = 6371000.0
+    lat0_rad = np.deg2rad(float(SAFOD_WELLHEAD_LAT_WGS84))
+    east = (
+        np.deg2rad(longitude - float(SAFOD_WELLHEAD_LON_WGS84))
+        * earth_radius_m
+        * np.cos(lat0_rad)
+    )
+    north = (
+        np.deg2rad(latitude - float(SAFOD_WELLHEAD_LAT_WGS84))
+        * earth_radius_m
+    )
+    return east, north
+
+
+def build_phase_guide_geometry(reference: dict[str, Any]) -> PhaseGuideGeometry:
+    """Build the same canonical SAFOD 2-D profile used by prepare_event.py."""
+    down = reference["down"].copy().sort_values("TVD_m")
+    required = {"Lat_WGS84", "Lon_WGS84", "TVD_m"}
+    if not required.issubset(down.columns):
+        raise ValueError(
+            "Reference down-leg geometry lacks latitude/longitude/TVD columns."
+        )
+
+    down_lat = pd.to_numeric(down["Lat_WGS84"], errors="coerce").to_numpy(float)
+    down_lon = pd.to_numeric(down["Lon_WGS84"], errors="coerce").to_numpy(float)
+    down_tvd = pd.to_numeric(down["TVD_m"], errors="coerce").to_numpy(float)
+    finite = np.isfinite(down_lat) & np.isfinite(down_lon) & np.isfinite(down_tvd)
+    if np.count_nonzero(finite) < 10:
+        raise RuntimeError("Too few finite down-leg points for phase-guide profile.")
+
+    down_lat = down_lat[finite]
+    down_lon = down_lon[finite]
+    down_tvd = down_tvd[finite]
+    east, north = _latlon_to_local_en_m(down_lat, down_lon)
+
+    deep_mask = down_tvd > np.nanpercentile(down_tvd, 90.0)
+    if np.count_nonzero(deep_mask) < 5:
+        deep_mask = down_tvd > np.nanpercentile(down_tvd, 80.0)
+    e_deep = float(np.nanmedian(east[deep_mask]))
+    n_deep = float(np.nanmedian(north[deep_mask]))
+    norm = float(np.hypot(e_deep, n_deep))
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise RuntimeError("Could not define SAFOD 2-D profile direction.")
+    u_e = e_deep / norm
+    u_n = n_deep / norm
+
+    borehole = reference["borehole"].copy().sort_values("fibre_distance_m")
+    required = {
+        "fibre_distance_m", "TVD_m", "Lat_WGS84", "Lon_WGS84"
+    }
+    if not required.issubset(borehole.columns):
+        raise ValueError("Reference borehole lacks phase-guide geometry columns.")
+
+    fibre = pd.to_numeric(
+        borehole["fibre_distance_m"], errors="coerce"
+    ).to_numpy(float)
+    tvd = pd.to_numeric(borehole["TVD_m"], errors="coerce").to_numpy(float)
+    lat = pd.to_numeric(borehole["Lat_WGS84"], errors="coerce").to_numpy(float)
+    lon = pd.to_numeric(borehole["Lon_WGS84"], errors="coerce").to_numpy(float)
+    valid = np.isfinite(fibre) & np.isfinite(tvd) & np.isfinite(lat) & np.isfinite(lon)
+    fibre, tvd, lat, lon = fibre[valid], tvd[valid], lat[valid], lon[valid]
+    order = np.argsort(fibre)
+    fibre, tvd, lat, lon = fibre[order], tvd[order], lat[order], lon[order]
+    east, north = _latlon_to_local_en_m(lat, lon)
+    x_model = east * u_e + north * u_n
+
+    if fibre.size < 2 or np.any(np.diff(fibre) <= 0.0):
+        raise RuntimeError("Phase-guide fibre axis is invalid.")
+
+    return PhaseGuideGeometry(
+        fibre_distance_m=fibre,
+        receiver_x_m=x_model,
+        receiver_z_m=tvd,
+        profile_u_e=float(u_e),
+        profile_u_n=float(u_n),
+    )
+
+
+def _event_model_coordinates(
+    event_row: pd.Series,
+    geometry: PhaseGuideGeometry,
+) -> tuple[float, float]:
+    lat = finite_float(event_row.get("latitude", np.nan))
+    lon = finite_float(event_row.get("longitude", np.nan))
+    depth_km = finite_float(event_row.get("depth_km", np.nan))
+    if not all(np.isfinite(v) for v in (lat, lon, depth_km)):
+        raise ValueError("Event latitude/longitude/depth are required for phase guides.")
+
+    east, north = _latlon_to_local_en_m(lat, lon)
+    x_model = float(east * geometry.profile_u_e + north * geometry.profile_u_n)
+    # NCEDC depth is geoid/MSL-referenced; the solver z=0 is local ground.
+    z_model = float(depth_km * 1000.0 + SAFOD_SURFACE_ELEVATION_M)
+    return x_model, z_model
+
+
+def _phase_receivers_at_fibre(
+    geometry: PhaseGuideGeometry,
+    fibre_distance_m: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    fibre = np.asarray(fibre_distance_m, dtype=np.float64)
+    x = np.interp(
+        fibre, geometry.fibre_distance_m, geometry.receiver_x_m
+    )
+    z = np.interp(
+        fibre, geometry.fibre_distance_m, geometry.receiver_z_m
+    )
+    return x, z
+
+
+def _write_phase_model_geometry_csv(
+    *,
+    reference: dict[str, Any],
+    geometry: PhaseGuideGeometry,
+    path: Path,
+) -> None:
+    """Write a temporary MD -> X_2D/TVD table for the model factory."""
+    down = reference["down"].copy().sort_values("MD_m")
+    required = {"MD_m", "TVD_m", "Lat_WGS84", "Lon_WGS84"}
+    if not required.issubset(down.columns):
+        raise ValueError("Reference down-leg lacks MD/TVD/lat/lon columns.")
+
+    lat = pd.to_numeric(down["Lat_WGS84"], errors="coerce").to_numpy(float)
+    lon = pd.to_numeric(down["Lon_WGS84"], errors="coerce").to_numpy(float)
+    md = pd.to_numeric(down["MD_m"], errors="coerce").to_numpy(float)
+    tvd = pd.to_numeric(down["TVD_m"], errors="coerce").to_numpy(float)
+    east, north = _latlon_to_local_en_m(lat, lon)
+    x = east * geometry.profile_u_e + north * geometry.profile_u_n
+    valid = np.isfinite(md) & np.isfinite(tvd) & np.isfinite(x)
+    out = pd.DataFrame(
+        {
+            "MD_m": md[valid],
+            "X_2D_m": x[valid],
+            "Z_2D_m": tvd[valid],
+        }
+    ).sort_values("MD_m")
+    out = out.groupby("MD_m", as_index=False).mean(numeric_only=True)
+    if len(out) < 20:
+        raise RuntimeError("Too few rows for temporary SAFOD model geometry.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False)
+
+
+def _uniform_axis_spacing(axis: np.ndarray, label: str) -> float:
+    axis = np.asarray(axis, dtype=np.float64)
+    if axis.ndim != 1 or axis.size < 2 or np.any(np.diff(axis) <= 0.0):
+        raise ValueError(f"{label} axis must be 1-D and strictly increasing.")
+    delta = np.diff(axis)
+    spacing = float(np.median(delta))
+    if not np.allclose(delta, spacing, rtol=1.0e-6, atol=1.0e-6):
+        raise ValueError(f"{label} axis is not uniformly sampled.")
+    return spacing
+
+
+def _make_eikonal_model(
+    *,
+    name: str,
+    label: str,
+    x_m: np.ndarray,
+    z_m: np.ndarray,
+    vp_mps: np.ndarray,
+    vs_mps: np.ndarray,
+) -> EikonalPhaseModel:
+    x = np.asarray(x_m, dtype=np.float64)
+    z = np.asarray(z_m, dtype=np.float64)
+    vp = np.asarray(vp_mps, dtype=np.float64)
+    vs = np.asarray(vs_mps, dtype=np.float64)
+    expected = (x.size, z.size)
+    if vp.shape != expected or vs.shape != expected:
+        raise ValueError(
+            f"Phase model {name}: Vp/Vs shape must be {expected}; "
+            f"got {vp.shape}/{vs.shape}."
+        )
+    _uniform_axis_spacing(x, f"{name} x")
+    _uniform_axis_spacing(z, f"{name} z")
+    if (
+        np.any(~np.isfinite(vp)) or np.any(~np.isfinite(vs))
+        or np.any(vp <= 0.0) or np.any(vs <= 0.0)
+    ):
+        raise ValueError(f"Phase model {name} contains invalid velocities.")
+    return EikonalPhaseModel(name, label, x, z, vp, vs)
+
+
+def prepare_phase_guide_context(
+    *,
+    reference: dict[str, Any],
+    args: argparse.Namespace,
+) -> PhaseGuideContext:
+    geometry = build_phase_guide_geometry(reference)
+    models: list[EikonalPhaseModel] = []
+    errors: list[str] = []
+
+    if args.phase_guide_mode in {"auto", "eikonal"}:
+        try:
+            with tempfile.TemporaryDirectory(prefix="safod_phase_geometry_") as tmp:
+                geom_csv = Path(tmp) / "safod_downleg_model_geometry.csv"
+                _write_phase_model_geometry_csv(
+                    reference=reference,
+                    geometry=geometry,
+                    path=geom_csv,
+                )
+                grid, model, _, _, _ = build_initial_model(
+                    model_name=args.phase_model,
+                    geom_file=geom_csv,
+                    x_column="X_2D_m",
+                    z_column="Z_2D_m",
+                    dx=float(args.phase_grid_spacing_m),
+                    dz=float(args.phase_grid_spacing_m),
+                    dt=None,
+                    nt=2,
+                    half_order=2,
+                    cfl_safety=0.80,
+                    x_grid_min_m=float(SAFOD_SCIENTIFIC_X_MIN_M),
+                    x_grid_max_m=float(SAFOD_SCIENTIFIC_X_MAX_M),
+                    z_max_m=float(args.phase_local_z_max_m),
+                    z_padding_bottom_m=0.0,
+                )
+            models.append(
+                _make_eikonal_model(
+                    name=str(args.phase_model),
+                    label="preferred SAFOD hybrid",
+                    x_m=np.asarray(grid.x),
+                    z_m=np.asarray(grid.z),
+                    vp_mps=model.vp,
+                    vs_mps=model.vs,
+                )
+            )
+        except Exception as exc:
+            errors.append(
+                "preferred model: " + f"{type(exc).__name__}: {exc}"
+            )
+
+        try:
+            with np.load(Path(args.phase_zhang_section), allow_pickle=False) as pkg:
+                regional = _make_eikonal_model(
+                    name="zhang2009_regional_section",
+                    label="Zhang 2009 regional",
+                    x_m=np.asarray(pkg["x_model_m"]),
+                    z_m=np.asarray(pkg["depth_m"]),
+                    vp_mps=np.asarray(pkg["vp_mps"]),
+                    vs_mps=np.asarray(pkg["vs_mps"]),
+                )
+            models.append(regional)
+        except Exception as exc:
+            errors.append(
+                "regional Zhang: " + f"{type(exc).__name__}: {exc}"
+            )
+
+    error_text = "; ".join(errors) if errors else None
+    if args.phase_guide_mode == "eikonal" and not models:
+        raise RuntimeError(
+            "No eikonal phase model could be prepared. " + str(error_text)
+        )
+    if error_text:
+        print("phase-guide model warning:", error_text)
+
+    return PhaseGuideContext(
+        geometry=geometry,
+        eikonal_models=tuple(models),
+        eikonal_error=error_text,
+    )
+
+
+def _load_eikonal_modules():
+    # GenericSolver looks at DATAPATH during import.  /tmp is sufficient for
+    # this forward-only use and avoids the harmless warning printed otherwise.
+    os.environ.setdefault("DATAPATH", os.environ.get("TMPDIR", "/tmp"))
+    for path in (EIKO_HYPO_TOMO_PYTHON, EIKO_GENERIC_SOLVER_PYTHON):
+        text = str(path)
+        if text not in sys.path:
+            sys.path.insert(0, text)
+    import EikonalTomography2DMod  # noqa: E402
+    import pyVector  # noqa: E402
+    return EikonalTomography2DMod, pyVector
+
+
+def _coordinates_fit_eikonal_model(
+    model: EikonalPhaseModel,
+    *,
+    source_x_m: float,
+    source_z_m: float,
+    receiver_x_m: np.ndarray,
+    receiver_z_m: np.ndarray,
+) -> bool:
+    # Receiver interpolation in EikoHypoTomo accesses ix+1, iz+1, so receiver
+    # coordinates must be strictly below the final x/z nodes.  The source may
+    # occupy the final node because Acc_Inj=False injects it by grid index.
+    x0, x1 = float(model.x_m[0]), float(model.x_m[-1])
+    z0, z1 = float(model.z_m[0]), float(model.z_m[-1])
+    eps_x = max(1.0e-9, 1.0e-9 * abs(x1 - x0))
+    eps_z = max(1.0e-9, 1.0e-9 * abs(z1 - z0))
+    return bool(
+        x0 <= source_x_m <= x1
+        and z0 <= source_z_m <= z1
+        and np.all(receiver_x_m >= x0)
+        and np.all(receiver_x_m < x1 - eps_x)
+        and np.all(receiver_z_m >= z0)
+        and np.all(receiver_z_m < z1 - eps_z)
+    )
+
+
+def _solve_eikonal_phase(
+    *,
+    velocity_mps: np.ndarray,
+    x_m: np.ndarray,
+    z_m: np.ndarray,
+    source_x_m: float,
+    source_z_m: float,
+    receiver_x_m: np.ndarray,
+    receiver_z_m: np.ndarray,
+) -> np.ndarray:
+    EikonalTomography2DMod, pyVector = _load_eikonal_modules()
+    dx = _uniform_axis_spacing(x_m, "eikonal x")
+    dz = _uniform_axis_spacing(z_m, "eikonal z")
+
+    vv = pyVector.vectorIC(
+        np.asarray(velocity_mps[np.newaxis, :, :], dtype=np.float32)
+    )
+    source = np.array([[source_x_m, source_z_m]], dtype=np.float64)
+    receivers = np.column_stack(
+        [receiver_x_m, receiver_z_m]
+    ).astype(np.float64, copy=False)
+    tt = pyVector.vectorIC(
+        np.zeros((1, receivers.shape[0]), dtype=np.float32)
+    )
+    tt.zero()
+
+    op = EikonalTomography2DMod.EikonalTT_2D(
+        vv,
+        tt,
+        float(x_m[0]),
+        float(z_m[0]),
+        dx,
+        dz,
+        source,
+        receivers,
+        verbose=False,
+        allocateTT=False,
+        # PointSourceSolver accurate injection returns NaN for the wrapper's
+        # singleton y dimension.  The tested grid-node injection is stable.
+        Acc_Inj=False,
+        nthreads=1,
+    )
+    op.forward(False, vv, tt)
+    values = np.asarray(tt.getNdArray()[0], dtype=np.float64).copy()
+    if values.shape != (receivers.shape[0],) or np.any(~np.isfinite(values)):
+        raise RuntimeError("Eikonal solver returned non-finite travel times.")
+    if np.any(values < 0.0):
+        raise RuntimeError("Eikonal solver returned negative travel times.")
+    return values
+
+
+def predict_eikonal_phase_travel_times(
+    *,
+    event_row: pd.Series,
+    context: PhaseGuideContext,
+    fibre_distance_m: np.ndarray,
+) -> PhaseTravelTimeGuide | None:
+    if not context.eikonal_models:
+        return None
+
+    source_x, source_z = _event_model_coordinates(event_row, context.geometry)
+    receiver_x, receiver_z = _phase_receivers_at_fibre(
+        context.geometry, fibre_distance_m
+    )
+
+    for model in context.eikonal_models:
+        if not _coordinates_fit_eikonal_model(
+            model,
+            source_x_m=source_x,
+            source_z_m=source_z,
+            receiver_x_m=receiver_x,
+            receiver_z_m=receiver_z,
+        ):
+            continue
+
+        try:
+            tp = _solve_eikonal_phase(
+                velocity_mps=model.vp_mps,
+                x_m=model.x_m,
+                z_m=model.z_m,
+                source_x_m=source_x,
+                source_z_m=source_z,
+                receiver_x_m=receiver_x,
+                receiver_z_m=receiver_z,
+            )
+            ts = _solve_eikonal_phase(
+                velocity_mps=model.vs_mps,
+                x_m=model.x_m,
+                z_m=model.z_m,
+                source_x_m=source_x,
+                source_z_m=source_z,
+                receiver_x_m=receiver_x,
+                receiver_z_m=receiver_z,
+            )
+        except Exception as exc:
+            print(
+                f"phase-guide eikonal failed for {model.label}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+
+        return PhaseTravelTimeGuide(
+            fibre_distance_m=np.asarray(fibre_distance_m, dtype=np.float64),
+            p_time_s=tp,
+            s_time_s=ts,
+            method="2-D eikonal FMM (EikoHypoTomo/pykonal, Acc_Inj=False)",
+            model_name=model.name,
+            model_label=model.label,
+            source_x_m=source_x,
+            source_z_m=source_z,
+            grid_dx_m=_uniform_axis_spacing(model.x_m, "phase model x"),
+            grid_dz_m=_uniform_axis_spacing(model.z_m, "phase model z"),
+        )
+
+    return None
+
+
+def predict_straight_ray_phase_travel_times(
+    *,
+    event_row: pd.Series,
+    reference: dict[str, Any],
+    fibre_distance_m: np.ndarray,
+    vp_km_s: float,
+    vs_km_s: float,
+    fallback_wellhead_elevation_m: float | None = None,
+) -> PhaseTravelTimeGuide | None:
+    """Robust fallback for events outside available eikonal model domains."""
+    vp_km_s = float(vp_km_s)
+    vs_km_s = float(vs_km_s)
+    if not (np.isfinite(vp_km_s) and np.isfinite(vs_km_s)):
+        raise ValueError("P/S guide velocities must be finite.")
+    if not (vp_km_s > vs_km_s > 0.0):
+        raise ValueError("Require Vp > Vs > 0 for P/S travel-time guides.")
+
+    source_lat = finite_float(event_row.get("latitude", np.nan))
+    source_lon = finite_float(event_row.get("longitude", np.nan))
+    source_depth_km = finite_float(event_row.get("depth_km", np.nan))
+    wellhead_elev_m = infer_wellhead_elevation_m(
+        event_row, fallback_wellhead_elevation_m
+    )
+    if not all(
+        np.isfinite(value)
+        for value in (source_lat, source_lon, source_depth_km, wellhead_elev_m)
+    ):
+        return None
+
+    borehole = reference["borehole"].copy().sort_values("fibre_distance_m")
+    required = {"fibre_distance_m", "TVD_m", "Lat_WGS84", "Lon_WGS84"}
+    if not required.issubset(borehole.columns):
+        return None
+    ref_fibre = pd.to_numeric(borehole["fibre_distance_m"], errors="coerce").to_numpy(float)
+    ref_tvd = pd.to_numeric(borehole["TVD_m"], errors="coerce").to_numpy(float)
+    ref_lat = pd.to_numeric(borehole["Lat_WGS84"], errors="coerce").to_numpy(float)
+    ref_lon = pd.to_numeric(borehole["Lon_WGS84"], errors="coerce").to_numpy(float)
+    valid = np.isfinite(ref_fibre) & np.isfinite(ref_tvd) & np.isfinite(ref_lat) & np.isfinite(ref_lon)
+    if np.count_nonzero(valid) < 2:
+        return None
+    ref_fibre, ref_tvd, ref_lat, ref_lon = (
+        ref_fibre[valid], ref_tvd[valid], ref_lat[valid], ref_lon[valid]
+    )
+    order = np.argsort(ref_fibre)
+    ref_fibre, ref_tvd, ref_lat, ref_lon = (
+        ref_fibre[order], ref_tvd[order], ref_lat[order], ref_lon[order]
+    )
+    x = np.asarray(fibre_distance_m, dtype=float)
+    receiver_tvd = np.interp(x, ref_fibre, ref_tvd)
+    receiver_lat = np.interp(x, ref_fibre, ref_lat)
+    receiver_lon = np.interp(x, ref_fibre, ref_lon)
+
+    earth_radius_m = 6371000.0
+    source_lat_rad = np.deg2rad(source_lat)
+    east_m = (
+        np.deg2rad(receiver_lon - source_lon)
+        * earth_radius_m
+        * np.cos(source_lat_rad)
+    )
+    north_m = np.deg2rad(receiver_lat - source_lat) * earth_radius_m
+    horizontal_m = np.hypot(east_m, north_m)
+    receiver_elevation_m = wellhead_elev_m - receiver_tvd
+    source_elevation_m = -1000.0 * source_depth_km
+    vertical_m = receiver_elevation_m - source_elevation_m
+    distance_m = np.hypot(horizontal_m, vertical_m)
+    if not np.all(np.isfinite(distance_m)):
+        return None
+
+    source_x, source_z = _event_model_coordinates(
+        event_row,
+        build_phase_guide_geometry(reference),
+    )
+    return PhaseTravelTimeGuide(
+        fibre_distance_m=x,
+        p_time_s=distance_m / (1000.0 * vp_km_s),
+        s_time_s=distance_m / (1000.0 * vs_km_s),
+        method="3-D straight-ray constant-effective-velocity fallback",
+        model_name="constant_effective_velocity",
+        model_label="straight-ray fallback",
+        source_x_m=source_x,
+        source_z_m=source_z,
+        fallback_vp_km_s=vp_km_s,
+        fallback_vs_km_s=vs_km_s,
+    )
+
+
+def choose_phase_travel_time_guide(
+    *,
+    event_row: pd.Series,
+    reference: dict[str, Any],
+    context: PhaseGuideContext,
+    fibre_distance_m: np.ndarray,
+    args: argparse.Namespace,
+) -> PhaseTravelTimeGuide | None:
+    if args.no_travel_time_guides or args.phase_guide_mode == "none":
+        return None
+
+    if args.phase_guide_mode in {"auto", "eikonal"}:
+        guide = predict_eikonal_phase_travel_times(
+            event_row=event_row,
+            context=context,
+            fibre_distance_m=fibre_distance_m,
+        )
+        if guide is not None:
+            return guide
+        if args.phase_guide_mode == "eikonal":
+            return None
+
+    return predict_straight_ray_phase_travel_times(
+        event_row=event_row,
+        reference=reference,
+        fibre_distance_m=fibre_distance_m,
+        vp_km_s=args.vp_guide_km_s,
+        vs_km_s=args.vs_guide_km_s,
+        fallback_wellhead_elevation_m=args.wellhead_elevation_m,
+    )
+
+
+def resample_phase_guide(
+    guide: PhaseTravelTimeGuide | None,
+    fibre_distance_m: np.ndarray,
+) -> PhaseTravelTimeGuide | None:
+    if guide is None:
+        return None
+    fibre = np.asarray(fibre_distance_m, dtype=np.float64)
+    return PhaseTravelTimeGuide(
+        fibre_distance_m=fibre,
+        p_time_s=np.interp(fibre, guide.fibre_distance_m, guide.p_time_s),
+        s_time_s=np.interp(fibre, guide.fibre_distance_m, guide.s_time_s),
+        method=guide.method,
+        model_name=guide.model_name,
+        model_label=guide.model_label,
+        source_x_m=guide.source_x_m,
+        source_z_m=guide.source_z_m,
+        grid_dx_m=guide.grid_dx_m,
+        grid_dz_m=guide.grid_dz_m,
+        fallback_vp_km_s=guide.fallback_vp_km_s,
+        fallback_vs_km_s=guide.fallback_vs_km_s,
+    )
+
+
+def adapt_recipe_to_phase_window(
+    *,
+    recipe: DisplayRecipe,
+    event_row: pd.Series,
+    reference: dict[str, Any],
+    context: PhaseGuideContext,
+    args: argparse.Namespace,
+) -> tuple[DisplayRecipe, PhaseTravelTimeGuide | None]:
+    guide = choose_phase_travel_time_guide(
+        event_row=event_row,
+        reference=reference,
+        context=context,
+        fibre_distance_m=context.geometry.fibre_distance_m,
+        args=args,
+    )
+    if guide is None:
+        return recipe, None
+
+    values = asdict(recipe)
+    if args.display_tmin is None:
+        values["display_tmin_s"] = max(
+            DEFAULT_DISPLAY_TMIN_S,
+            guide.p_min_s - float(args.phase_pre_s),
+        )
+    if args.display_tmax is None:
+        values["display_tmax_s"] = guide.s_max_s + float(args.phase_post_s)
+
+    if values["display_tmax_s"] <= values["display_tmin_s"]:
+        raise RuntimeError("Phase-based display window is empty.")
+
+    # IMPORTANT: the adaptive time window is not part of product identity.
+    # Keep recipe.name unchanged so --overwrite replaces the canonical PNG/JSON
+    # instead of generating a duplicate *_phase_window_* product.
+    return DisplayRecipe(**values), guide
 
 
 def sha256_file(path: Path) -> str:
@@ -1661,6 +2375,49 @@ def event_plot_filename(
     )
 
 
+def event_arrivals_plot_filename(
+    event_row: pd.Series,
+    recipe: DisplayRecipe,
+) -> str:
+    """Return the companion PNG containing the optional P/S guide overlay."""
+    base = Path(event_plot_filename(event_row, recipe))
+    return f"{base.stem}_arrivals{base.suffix}"
+
+
+def cleanup_legacy_phase_window_duplicates(
+    output_dir: Path,
+    *,
+    event_id: str | None = None,
+) -> list[Path]:
+    """
+    Remove products created by the temporary v2 naming bug.
+
+    A *_phase_window_* file is deleted only when its canonical sibling (same
+    filename with _phase_window_ removed) exists.  Matching JSON metadata are
+    removed together.  This deliberately does not touch any other recipes.
+    """
+    output_dir = Path(output_dir)
+    metadata_dir = output_dir / "metadata"
+    pattern = "*_phase_window_*.png"
+    if event_id is not None:
+        pattern = f"*event_{safe_token(event_id)}_*_phase_window_*.png"
+
+    removed: list[Path] = []
+    for legacy in sorted(output_dir.glob(pattern)):
+        canonical = legacy.with_name(
+            legacy.name.replace("_phase_window_", "_", 1)
+        )
+        if not canonical.exists():
+            continue
+        legacy.unlink()
+        removed.append(legacy)
+        legacy_meta = metadata_dir / f"{legacy.stem}.json"
+        if legacy_meta.exists():
+            legacy_meta.unlink()
+            removed.append(legacy_meta)
+    return removed
+
+
 def plot_event(
     *,
     data: np.ndarray,
@@ -1671,9 +2428,15 @@ def plot_event(
     recipe: DisplayRecipe,
     effective_fmax_hz: float,
     zero_phase: bool,
+    travel_time_guide: PhaseTravelTimeGuide | None,
     output_path: Path,
+    arrivals_output_path: Path | None,
     dpi: int,
 ) -> float:
+    """
+    Save a clean base plot and, when a phase guide is available, a companion
+    plot with P/S arrivals. Both renders use the same processed data and axes.
+    """
     x = registration.fibre_distance_m
     clip = robust_clip(data, recipe.pclip)
     left, right, dx = raster_edges(x)
@@ -1724,23 +2487,23 @@ def plot_event(
     ax.set_ylabel("Time from catalog origin [s]")
     ax.set_xlim(left, right)
     ax.set_ylim(float(time_s[-1]), float(time_s[0]))
-    ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
 
     m = registration.metadata
     phase = "zero phase" if zero_phase else "causal"
-    ax.text(
+    base_annotation = (
+        f"recording: {recording_label}\n"
+        f"configuration: {m['config_id']}\n"
+        f"turn DataRow: {m['canonical_turnaround_data_row']:.3f}\n"
+        f"registration uncertainty: ~{m['turnaround_uncertainty_m']:.2f} m\n"
+        f"recipe: {recipe.name}\n"
+        f"spatial sample: ~{dx:.3f} m\n"
+        f"clip: ±P{recipe.pclip:g} = {clip:.3g} nm/m/s\n"
+        f"filter: {phase}"
+    )
+    annotation = ax.text(
         0.01,
         0.99,
-        (
-            f"recording: {recording_label}\n"
-            f"configuration: {m['config_id']}\n"
-            f"turn DataRow: {m['canonical_turnaround_data_row']:.3f}\n"
-            f"registration uncertainty: ~{m['turnaround_uncertainty_m']:.2f} m\n"
-            f"recipe: {recipe.name}\n"
-            f"spatial sample: ~{dx:.3f} m\n"
-            f"clip: ±P{recipe.pclip:g} = {clip:.3g} nm/m/s\n"
-            f"filter: {phase}"
-        ),
+        base_annotation,
         transform=ax.transAxes,
         ha="left",
         va="top",
@@ -1755,8 +2518,49 @@ def plot_event(
     cb = fig.colorbar(image, ax=ax, pad=0.015)
     cb.set_label("strain rate [nm/m/s]")
 
+    # Base plot is intentionally clean: no P/S curves.
+    ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
     fig.tight_layout()
     fig.savefig(output_path, dpi=int(dpi), bbox_inches="tight")
+
+    # Companion render with the exact same DAS background and time window.
+    if travel_time_guide is not None and arrivals_output_path is not None:
+        phase_kind = (
+            "eikonal"
+            if "eikonal" in travel_time_guide.method.lower()
+            else "straight-ray"
+        )
+        ax.plot(
+            travel_time_guide.fibre_distance_m,
+            travel_time_guide.p_time_s,
+            color="#00d5ff",
+            lw=1.8,
+            ls="-",
+            label=f"P {phase_kind} — {travel_time_guide.model_label}",
+            zorder=5,
+        )
+        ax.plot(
+            travel_time_guide.fibre_distance_m,
+            travel_time_guide.s_time_s,
+            color="#7CFC00",
+            lw=1.8,
+            ls="--",
+            label=f"S {phase_kind} — {travel_time_guide.model_label}",
+            zorder=5,
+        )
+        annotation.set_text(
+            base_annotation
+            + "\n"
+            + f"P/S guides: {travel_time_guide.model_label}\n"
+            + f"method: {travel_time_guide.method}"
+        )
+        ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
+        fig.savefig(
+            arrivals_output_path,
+            dpi=int(dpi),
+            bbox_inches="tight",
+        )
+
     plt.close(fig)
     return clip
 
@@ -1773,6 +2577,7 @@ def process_event(
     zero_phase: bool,
     overwrite: bool,
     dpi: int,
+    phase_guide_full: PhaseTravelTimeGuide | None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     origin = pd.Timestamp(event_row["origin_time_utc"])
@@ -1788,9 +2593,19 @@ def process_event(
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     image_path = output_dir / event_plot_filename(event_row, recipe)
+    arrivals_image_path = output_dir / event_arrivals_plot_filename(
+        event_row,
+        recipe,
+    )
     metadata_path = metadata_dir / f"{image_path.stem}.json"
+    arrivals_expected = phase_guide_full is not None
 
-    if image_path.exists() and metadata_path.exists() and not overwrite:
+    if (
+        image_path.exists()
+        and metadata_path.exists()
+        and (not arrivals_expected or arrivals_image_path.exists())
+        and not overwrite
+    ):
         record = json.loads(metadata_path.read_text())
         record["status"] = "exists"
         record["elapsed_s"] = 0.0
@@ -1860,6 +2675,11 @@ def process_event(
     )
     data_display = data_display[registration.data_rows, :]
 
+    travel_time_guide = resample_phase_guide(
+        phase_guide_full,
+        registration.fibre_distance_m,
+    )
+
     recording_label = str(event_row["primary_recording"])
     clip = plot_event(
         data=data_display,
@@ -1870,7 +2690,11 @@ def process_event(
         recipe=recipe,
         effective_fmax_hz=effective_fmax,
         zero_phase=zero_phase,
+        travel_time_guide=travel_time_guide,
         output_path=image_path,
+        arrivals_output_path=(
+            arrivals_image_path if travel_time_guide is not None else None
+        ),
         dpi=dpi,
     )
 
@@ -1910,12 +2734,41 @@ def process_event(
         "effective_fmax_hz": float(effective_fmax),
         "zero_phase": bool(zero_phase),
         "display_clip_nm_per_m_per_s": float(clip),
+        "travel_time_guide": (
+            None
+            if travel_time_guide is None
+            else {
+                "method": travel_time_guide.method,
+                "model_name": travel_time_guide.model_name,
+                "model_label": travel_time_guide.model_label,
+                "source_x_m": float(travel_time_guide.source_x_m),
+                "source_z_m": float(travel_time_guide.source_z_m),
+                "grid_dx_m": finite_float(travel_time_guide.grid_dx_m),
+                "grid_dz_m": finite_float(travel_time_guide.grid_dz_m),
+                "fallback_vp_km_s": finite_float(
+                    travel_time_guide.fallback_vp_km_s
+                ),
+                "fallback_vs_km_s": finite_float(
+                    travel_time_guide.fallback_vs_km_s
+                ),
+                "p_min_s": travel_time_guide.p_min_s,
+                "p_max_s": travel_time_guide.p_max_s,
+                "s_min_s": travel_time_guide.s_min_s,
+                "s_max_s": travel_time_guide.s_max_s,
+            }
+        ),
         "files": files,
         "n_files": len(files),
         "n_channels": int(data_display.shape[0]),
         "read_fs_hz": float(fs_hz),
         "display_fs_hz": float(display_fs),
         "image_path": str(image_path),
+        "arrivals_image_path": (
+            str(arrivals_image_path)
+            if travel_time_guide is not None
+            else None
+        ),
+        "arrivals_available": bool(travel_time_guide is not None),
         "elapsed_s": float(time.perf_counter() - started),
     }
 
@@ -1923,6 +2776,17 @@ def process_event(
         json.dumps(result, indent=2),
         encoding="utf-8",
     )
+
+    removed = cleanup_legacy_phase_window_duplicates(
+        output_dir,
+        event_id=str(event_row["event_id"]),
+    )
+    if removed:
+        print(
+            "removed legacy duplicate products: "
+            + ", ".join(path.name for path in removed)
+        )
+
     return result
 
 
@@ -2902,6 +3766,76 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--display-tmax", type=float, default=None)
     parser.add_argument("--filter-pad", type=float, default=None)
     parser.add_argument("--pclip", type=float, default=None)
+    parser.add_argument(
+        "--no-travel-time-guides",
+        action="store_true",
+        help="Disable P/S guide curves and phase-based automatic windows.",
+    )
+    parser.add_argument(
+        "--phase-guide-mode",
+        choices=["auto", "eikonal", "straight", "none"],
+        default="auto",
+        help=(
+            "P/S prediction mode. auto: preferred hybrid eikonal, then Zhang "
+            "regional eikonal, then straight-ray fallback. Default: auto."
+        ),
+    )
+    parser.add_argument(
+        "--phase-model",
+        default=DEFAULT_PHASE_MODEL_NAME,
+        help="Preferred local SAFOD velocity model for eikonal P/S guides.",
+    )
+    parser.add_argument(
+        "--phase-grid-spacing-m",
+        type=float,
+        default=DEFAULT_PHASE_GRID_SPACING_M,
+        help="Grid spacing for the preferred local eikonal model.",
+    )
+    parser.add_argument(
+        "--phase-local-z-max-m",
+        type=float,
+        default=DEFAULT_PHASE_LOCAL_Z_MAX_M,
+        help="Maximum local preferred-model depth used by eikonal guides.",
+    )
+    parser.add_argument(
+        "--phase-zhang-section",
+        type=Path,
+        default=DEFAULT_ZHANG_SECTION,
+        help="Full Zhang 2009 regional 2-D section used as eikonal fallback.",
+    )
+    parser.add_argument(
+        "--vp-guide-km-s",
+        type=float,
+        default=DEFAULT_P_GUIDE_VELOCITY_KM_S,
+        help="Fallback straight-ray P velocity when eikonal coverage is unavailable.",
+    )
+    parser.add_argument(
+        "--vs-guide-km-s",
+        type=float,
+        default=DEFAULT_S_GUIDE_VELOCITY_KM_S,
+        help="Fallback straight-ray S velocity when eikonal coverage is unavailable.",
+    )
+    parser.add_argument(
+        "--phase-pre-s",
+        type=float,
+        default=DEFAULT_PHASE_PRE_S,
+        help="Seconds shown before the earliest predicted P guide.",
+    )
+    parser.add_argument(
+        "--phase-post-s",
+        type=float,
+        default=DEFAULT_PHASE_POST_S,
+        help="Seconds shown after the latest predicted S guide.",
+    )
+    parser.add_argument(
+        "--wellhead-elevation-m",
+        type=float,
+        default=None,
+        help=(
+            "Fallback wellhead elevation for travel-time geometry. Normally "
+            "inferred from catalog closest-cable elevation + TVD."
+        ),
+    )
     parser.add_argument("--dpi", type=int, default=DEFAULT_DPI)
     parser.add_argument("--zero-phase", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -2924,6 +3858,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    if not args.no_travel_time_guides and args.phase_guide_mode != "none":
+        if not (args.vp_guide_km_s > args.vs_guide_km_s > 0.0):
+            raise ValueError("Require --vp-guide-km-s > --vs-guide-km-s > 0.")
+        if args.phase_pre_s < 0.0 or args.phase_post_s < 0.0:
+            raise ValueError("Phase-window padding must be non-negative.")
+        if args.phase_grid_spacing_m <= 0.0:
+            raise ValueError("--phase-grid-spacing-m must be positive.")
+        if args.phase_local_z_max_m <= 0.0:
+            raise ValueError("--phase-local-z-max-m must be positive.")
 
     if args.prepare_geometry:
         prepare_geometry_registry(
@@ -3000,6 +3944,17 @@ def main() -> None:
         reference=reference,
     )
 
+    phase_context = prepare_phase_guide_context(
+        reference=reference,
+        args=args,
+    )
+
+    removed_legacy = cleanup_legacy_phase_window_duplicates(args.output_dir)
+    if removed_legacy:
+        print(
+            f"removed {len(removed_legacy)} legacy phase-window duplicate files"
+        )
+
     shard_configs = {}
     for i in indices:
         sig = event_configuration(catalog.iloc[i], manifest)
@@ -3038,12 +3993,30 @@ def main() -> None:
     for pos, event_index in enumerate(indices, start=1):
         event = catalog.iloc[event_index]
         recipe = resolve_recipe(event, args)
+        recipe, preview_guide = adapt_recipe_to_phase_window(
+            recipe=recipe,
+            event_row=event,
+            reference=reference,
+            context=phase_context,
+            args=args,
+        )
 
         print(
             f"\n[{pos}/{len(indices)}] event={event['event_id']} "
             f"origin={event['origin_time_utc']} "
             f"M={finite_float(event.get('magnitude', np.nan)):.1f}"
         )
+        if preview_guide is not None:
+            print(
+                f"phase guides ({preview_guide.model_label}): "
+                f"P={preview_guide.p_min_s:.2f}.."
+                f"{preview_guide.p_max_s:.2f} s, "
+                f"S={preview_guide.s_min_s:.2f}.."
+                f"{preview_guide.s_max_s:.2f} s, "
+                f"display={recipe.display_tmin_s:.2f}.."
+                f"{recipe.display_tmax_s:.2f} s"
+            )
+            print(f"phase method: {preview_guide.method}")
 
         try:
             result = process_event(
@@ -3057,6 +4030,7 @@ def main() -> None:
                 zero_phase=args.zero_phase,
                 overwrite=args.overwrite,
                 dpi=args.dpi,
+                phase_guide_full=preview_guide,
             )
             print(
                 f"status={result['status']}, "

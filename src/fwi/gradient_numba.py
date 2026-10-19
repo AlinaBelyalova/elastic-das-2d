@@ -53,21 +53,21 @@ from time import perf_counter
 import numpy as np
 from numba import njit, prange
 
-from src.das import DASResult, compute_axial_strain_rate, das_adjoint
-from src.sampling import ReceiverSampling2D
-from src.solver_numpy import (
+from src.das.strain import DASResult, compute_axial_strain_rate, das_adjoint
+from src.elastic.sampling import ReceiverSampling2D
+from src.elastic.solver_numpy import (
     fd_coefficients,
     make_sponge_mask,
     prepare_staggered_materials,
 )
-from src.solver_numba_fused import (
+from src.elastic.solver_numba_fused import (
     update_velocity_fused_numba,
     update_stress_fused_numba,
     inject_stress_source_numba,
     apply_sponge_numba,
     sample_receivers_numba_bilinear,
 )
-from src.source_injection import StressSourceInjection
+from src.elastic.source_injection import StressSourceInjection
 
 from src.fwi.adjoint_numba import (
     scatter_receivers_adjoint_numba,

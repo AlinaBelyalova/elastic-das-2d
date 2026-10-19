@@ -83,8 +83,8 @@ GEOPHONE_CHANNEL = "GP1"
 # Processing
 # ==============================================================================
 
-FMIN_HZ = 1.0
-FMAX_HZ = 20.0
+FMIN_HZ = 5.0
+FMAX_HZ = 30.0
 
 # Odd number -> Type-I linear-phase FIR.
 #
@@ -114,7 +114,7 @@ CORR_TMIN_S = 0.0
 CORR_TMAX_S = 1.0
 
 DEFAULT_OUTPUT_DIR = Path(
-    "results/real_event_20260401_75336802/"
+    "results/events/20260401_75336802/compare/"
     "das_geophone_physical_pairs"
 )
 

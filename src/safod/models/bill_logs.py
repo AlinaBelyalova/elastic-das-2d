@@ -52,11 +52,11 @@
 #
 # Usage
 # -----
-# from src.safod.models.digitized_log import build_digitized_log_model
+# from src.safod.models.bill_logs import build_bill_logs_model
 #
-# grid, model, x_cable, z_cable, metadata = build_safod_digitized_log_model(
+# grid, model, x_cable, z_cable, metadata = build_bill_logs_model(
 #     geom_file=GEOM_FILE,
-#     log_csv="data/safod/ellsworth_malin_2011_fig3a_digitized.csv",
+#     log_csv="data/safod/velocity_models/ellsworth_malin_2011/fig3a_digitized.csv",
 #     dx=5.0,
 #     dz=5.0,
 #     nt=...,
@@ -74,7 +74,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.model import ElasticModel2D
+from src.common.model import ElasticModel2D
 from .smooth_prior import (
     build_smooth_prior_model,
     fault_x_at_z,

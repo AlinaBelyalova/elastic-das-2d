@@ -1,12 +1,13 @@
 #!/bin/bash
+# Submit from the project root after: mkdir -p results/safod_deep/logs
 #SBATCH --job-name=safod_adaptive_qc
 #SBATCH --partition=normal
 #SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
 #SBATCH --array=0-7%4
-#SBATCH --output=safod_adaptive_qc_%A_%a.out
-#SBATCH --error=safod_adaptive_qc_%A_%a.err
+#SBATCH --output=results/safod_deep/logs/safod_adaptive_qc_%A_%a.out
+#SBATCH --error=results/safod_deep/logs/safod_adaptive_qc_%A_%a.err
 
 set -euo pipefail
 

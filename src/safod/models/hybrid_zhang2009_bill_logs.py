@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
 
-from src.grid import Grid2D
-from src.model import ElasticModel2D
-from src.solver_numpy import max_stable_dt
+from src.common.grid import Grid2D
+from src.common.model import ElasticModel2D
+from src.elastic.solver_numpy import max_stable_dt
 
 from .bill_logs import build_bill_logs_model
 from .smooth_prior import build_smooth_prior_model, fault_x_at_z

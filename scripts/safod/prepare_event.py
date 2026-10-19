@@ -56,10 +56,9 @@ from scripts.safod.settings import (
     SAFOD_WELLHEAD_LON_WGS84,
     SELECTED_FILES,
 )
-from src.signal_processing import bandpass_traces
+from src.common.signal_processing import bandpass_traces
 
 OUT_DIR = REAL_EVENT_DIR
-OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 FMIN = COMMON_FMIN_HZ
 FMAX = COMMON_FMAX_HZ
@@ -1572,6 +1571,7 @@ def main() -> None:
     # --------------------------------------------------------------------------
     # 0. Fetch real catalog event metadata first
     # --------------------------------------------------------------------------
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     event_meta = fetch_event_from_ncedc()
     eq_time = parse_catalog_time_to_datetime(event_meta["origin_time"])
 

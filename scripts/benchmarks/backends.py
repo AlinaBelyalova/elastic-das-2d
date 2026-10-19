@@ -3,12 +3,12 @@ from __future__ import annotations
 from time import perf_counter
 import numpy as np
 
-from src.grid import Grid2D
-from src.model import ElasticModel2D
-from src.source import build_dc_source
-from src.receivers import build_das_cable
-from src.simulator import run_forward_simulation
-from src.solver_numpy import max_stable_dt
+from src.common.grid import Grid2D
+from src.common.model import ElasticModel2D
+from src.elastic.source import build_dc_source
+from src.das.receivers import build_das_cable
+from src.elastic.simulator import run_forward_simulation
+from src.elastic.solver_numpy import max_stable_dt
 
 
 def build_homogeneous_model(

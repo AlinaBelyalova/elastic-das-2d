@@ -9,9 +9,9 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter1d
 from scipy.spatial import cKDTree
 
-from src.grid import Grid2D
-from src.model import ElasticModel2D
-from src.solver_numpy import max_stable_dt
+from src.common.grid import Grid2D
+from src.common.model import ElasticModel2D
+from src.elastic.solver_numpy import max_stable_dt
 
 from .zhang2009 import (
     DEFAULT_ZHANG_SECTION,

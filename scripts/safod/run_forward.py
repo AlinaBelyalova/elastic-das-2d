@@ -14,8 +14,8 @@
 # Requirements:
 #   - src.safod.models.factory.build_initial_model
 #   - src.safod.models.smooth_prior.fault_x_at_z
-#   - src.das supports continuous physical gauge lengths, e.g. GL=16.6213 m
-#   - src.plotting.place_safod_legend for figure-fraction legend placement
+#   - src.das.strain supports continuous physical gauge lengths, e.g. GL=16.6213 m
+#   - src.safod.plotting.place_safod_legend for figure-fraction legend placement
 #     (do NOT call fig.tight_layout() after plot_safod_model() — it would
 #     undo the reserved right margin and re-overlap the colorbar)
 # ==============================================================================
@@ -34,13 +34,13 @@ from src.safod.models import (
     build_initial_model,
     fault_x_at_z,
 )
-from src.source import build_dc_source
-from src.receivers import (
+from src.elastic.source import build_dc_source
+from src.das.receivers import (
     build_das_cable,
     build_receivers_from_channel_centres,
 )
-from src.simulator import run_forward_simulation
-from src.plotting import plot_safod_model, place_safod_legend
+from src.elastic.simulator import run_forward_simulation
+from src.safod.plotting import plot_safod_model, place_safod_legend
 from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.interpolate import RegularGridInterpolator
 
@@ -1684,7 +1684,7 @@ def main() -> None:
         )
     elif source_mode == "deep_saf":
         geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
-        out_dir = Path("results/safod_initial_forward")
+        out_dir = Path("results/safod/initial_forward")
     else:
         raise ValueError(f"Unknown source_mode: {source_mode!r}")
 
@@ -2313,7 +2313,7 @@ def main() -> None:
         c="yellow",
         edgecolors="black",
         zorder=20,
-        label="Synthetic source",
+        label="Source",
     )
 
     # Re-place the legend using the same robust figure-fraction coordinates

@@ -16,15 +16,15 @@ from typing import Iterable
 
 import numpy as np
 
-from src.grid import Grid2D
-from src.receivers import Receivers2D
-from src.das import DASResult, compute_axial_strain_rate
-from src.sampling import ReceiverSampling2D, build_receiver_sampling
-from src.source import MomentTensor2D, build_rotated_double_couple_2d
-from src.source_injection import StressSourceInjection
-from src.source_spreading import build_stress_source_spreading
-from src.solver_numpy import ElasticRunResult, max_stable_dt
-from src.solver_numba_fused import run_elastic_solver_numba_fused
+from src.common.grid import Grid2D
+from src.das.receivers import Receivers2D
+from src.das.strain import DASResult, compute_axial_strain_rate
+from src.elastic.sampling import ReceiverSampling2D, build_receiver_sampling
+from src.elastic.source import MomentTensor2D, build_rotated_double_couple_2d
+from src.elastic.source_injection import StressSourceInjection
+from src.elastic.source_spreading import build_stress_source_spreading
+from src.elastic.solver_numpy import ElasticRunResult, max_stable_dt
+from src.elastic.solver_numba_fused import run_elastic_solver_numba_fused
 
 
 @dataclass(frozen=True)

@@ -1,1 +1,1 @@
-# SAFOD-specific model-building utilities.
+"""SAFOD velocity models (models/) and SAFOD-specific plotting (plotting)."""

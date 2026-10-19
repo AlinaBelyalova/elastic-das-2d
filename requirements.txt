@@ -4,3 +4,19 @@ matplotlib>=3.7
 numba>=0.58
 jupyter>=1.0
 ipykernel>=6.0
+
+# SAFOD data access, catalogs, web viewer and tests
+# (versions in the fwi env on 2026-10-16: pandas 3.0.2, h5py 3.14.0,
+#  obspy 1.5.0, pyproj 3.6.1, python-dateutil 2.9.0, openpyxl 3.1.5,
+#  Pillow 12.1.1, pytest 9.0.2)
+pandas
+h5py
+obspy
+pyproj
+python-dateutil
+openpyxl
+Pillow
+pytest
+
+# Not on PyPI: DAS-utilities (DASutils, pyDAS; built for the geo env) and
+# EikoHypoTomo (pyVector, EikonalTomography2DMod). See docs/setup.md.

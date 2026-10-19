@@ -27,7 +27,7 @@
 # - C-SFD and TS-SFD coefficients are both supported;
 # - multiplicative sponge is included exactly;
 # - bilinear receiver sampling and bilinear/nearest source spreading supported;
-# - DAS transpose is composed outside the hot loop using src.das.das_adjoint;
+# - DAS transpose is composed outside the hot loop using src.das.strain.das_adjoint;
 # - no model gradient yet: this file first closes the wave-equation adjoint.
 #
 # Performance design
@@ -45,15 +45,15 @@ from time import perf_counter
 import numpy as np
 from numba import njit, prange
 
-from src.das import DASResult, das_adjoint
-from src.sampling import ReceiverSampling2D
-from src.solver_numpy import (
+from src.das.strain import DASResult, das_adjoint
+from src.elastic.sampling import ReceiverSampling2D
+from src.elastic.solver_numpy import (
     fd_coefficients,
     make_sponge_mask,
     prepare_staggered_materials,
 )
-from src.solver_numba_fused import apply_sponge_numba
-from src.source_injection import StressSourceInjection
+from src.elastic.solver_numba_fused import apply_sponge_numba
+from src.elastic.source_injection import StressSourceInjection
 
 from src.fwi.two_layer import (
     ElasticMedium2D,

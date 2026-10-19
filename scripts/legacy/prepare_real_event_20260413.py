@@ -61,7 +61,7 @@ PROJECTED_CSV = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.
 DAS_DB_PY = "/home/groups/ettore88/alina/packages/DAS-utilities/python/DAS_db.py"
 DAS_SYSTEM_NAME = "SAFOD_QuantX"
 
-OUT_DIR = Path("results/real_event_20260413_M153")
+OUT_DIR = Path("results/legacy/real_event_20260413_M153")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Real DAS preprocessing.
