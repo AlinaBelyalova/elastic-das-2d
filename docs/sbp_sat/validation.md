@@ -19,7 +19,7 @@ into them. The historical ZIP/PATCH packages of the add-on are stored
 outside the project, in
 `/home/groups/ettore88/alina/project_archives/Elastic_das_project/cleanup_20261017T004124Z.tar.gz`
 (`removed/sbp_sat_qc_addon_v2.zip`, `removed/sbp_sat_qc_addon_v2.patch`).
-Older handoffs and other history: [docs/history/README.md](../history/README.md)
+Older handoffs and other history: `docs/history/README.md`
 (local only: `docs/history/` is excluded from Git).
 
 ## Run the checks

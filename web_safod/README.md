@@ -216,11 +216,15 @@ Front-end tests need Node.js (`ml devel nodejs/20.20.0`):
 node --test web_safod/tests/test_app.cjs
 ```
 
-Known state (2026-10-16): 11 of 12 tests fail. Ten of them report
-`Unexpected request: data/focal_mechanisms.json?v=test`: the fetch stub in
-`test_app.cjs` does not serve that file, which `templates/app.js` requests at
-startup. The eleventh fails on the visible-event count; its cause was not
-checked separately. The test has to be updated.
+The Node tests cover direct event links, delayed optional layers, event
+switching, filter reset, dialog closing and malformed URLs. The fetch and
+Leaflet stubs include the optional focal-mechanism catalog and current marker
+methods. A missing focal-mechanism catalog (HTTP 404) is also tested.
+Plot URLs include the build identifier used to invalidate browser caches.
+
+On 2026-10-19 all 13 Node tests passed after the test-stub updates and fixes
+to direct-link navigation. These are automated logic tests, not a live-site
+browser check with the complete SAFOD catalog.
 
 ## Public-data rule
 

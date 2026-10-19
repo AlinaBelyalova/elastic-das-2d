@@ -57,7 +57,7 @@ web_safod/    статический просмотрщик событий SAFOD
 | Скоростные модели | [docs/safod/workflow.md](docs/safod/workflow.md) | `scripts/safod/velocity_models/`, `src/safod/models/` | `data/safod/velocity_models/` |
 | Все проверки | [scripts/validation/README.md](scripts/validation/README.md) | `scripts/validation/` | `results/validation/` |
 | Где что лежит | [docs/project_map.md](docs/project_map.md) | — | [results/README.md](results/README.md) |
-| История | [docs/history/README.md](docs/history/README.md) | `scripts/legacy/` ([README](scripts/legacy/README.md)) | `results/legacy/` |
+| История | `docs/history/README.md` | `scripts/legacy/` ([README](scripts/legacy/README.md)) | `results/legacy/` |
 
 ## Быстрая проверка
 

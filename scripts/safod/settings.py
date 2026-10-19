@@ -231,10 +231,11 @@ EVENT = {
 
 EVENT_TAG = str(ACTIVE_EVENT["event_tag"])
 
-SELECTED_FILES = resolve_event_input_files(
-    ACTIVE_EVENT_KEY,
-    require_exists=True,
-)
+
+def get_selected_files() -> list[str]:
+    """Validate raw inputs when starting event preparation, not at import."""
+    return resolve_event_input_files(ACTIVE_EVENT_KEY, require_exists=True)
+
 
 _mapping_value = ACTIVE_EVENT.get("channel_mapping_csv")
 

@@ -60,7 +60,7 @@
 | Входы скоростных моделей | `data/safod/velocity_models/<источник>/` (обычно `raw/`, `processed/`; локально, вне Git). QC подготовки моделей лежит рядом в `qc/` — оговорённое исключение из правила `results/` |
 | Сырые записи DAS, окружения, внешние пути | на Oak и в `/home/groups`; перечень — [setup.md](setup.md) |
 | Веб-просмотрщик | `web_safod/`: `builder/` (библиотека сборки), `scripts/` (точки входа), `templates/` (исходники страницы), `config/`, `reference/`, `docs/`, `tests/`, `site/` (генерируется; в Git только README), `cache/` (кэш и логи сборки); [README](../web_safod/README.md) |
-| История, прежние handoff, переносы | [docs/history/README.md](history/README.md) (только в локальной копии, вне Git) |
+| История, прежние handoff, переносы | `docs/history/README.md` (только в локальной копии, вне Git) |
 
 ## Схема работы
 

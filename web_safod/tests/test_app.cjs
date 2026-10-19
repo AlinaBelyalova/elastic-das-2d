@@ -37,13 +37,14 @@ function element() {
     addEventListener(name, callback) { listeners.set(name, callback); },
     dispatch(name, value = {}) { listeners.get(name)?.(value); },
     appendChild() {},
+    setAttribute(name, value) { this[name] = String(value); },
     removeAttribute(name) { delete this[name]; },
     showModal() { this.open = true; },
     close() { this.open = false; },
   };
 }
 
-function startApp(hash = "", { delayLayers = false, delayCatalog = false } = {}) {
+function startApp(hash = "", { delayLayers = false, delayCatalog = false, missingFocal = false } = {}) {
   const elements = new Map();
   const windowListeners = new Map();
   const errors = [];
@@ -68,7 +69,9 @@ function startApp(hash = "", { delayLayers = false, delayCatalog = false } = {})
     }
     return elements.get(id);
   };
-  const chain = () => ({
+  const chain = () => {
+    const ownedLayers = new Set();
+    return ({
     addTo() { return this; },
     setView(coordinates, zoom, options) {
       view = { coordinates: Array.from(coordinates), zoom, animate: options?.animate };
@@ -84,13 +87,21 @@ function startApp(hash = "", { delayLayers = false, delayCatalog = false } = {})
     },
     bringToFront() { return this; },
     on() { return this; },
-    bindTooltip() { return this; },
-    bindPopup() { return this; },
-    hasLayer: (layer) => layers.has(layer),
-    addLayer: (layer) => layers.add(layer),
-    removeLayer: (layer) => layers.delete(layer),
-    eachLayer: (callback) => layers.forEach(callback),
-  });
+    bindTooltip() { this.tooltip = {}; return this; },
+    bindPopup() { this.popup = {}; return this; },
+    getTooltip() { return this.tooltip; },
+    getPopup() { return this.popup; },
+    hasLayer: (layer) => ownedLayers.has(layer),
+    addLayer(layer) { ownedLayers.add(layer); layers.add(layer); return this; },
+    removeLayer(layer) { ownedLayers.delete(layer); layers.delete(layer); return this; },
+    eachLayer: (callback) => ownedLayers.forEach(callback),
+    clearLayers() {
+      ownedLayers.forEach((layer) => layers.delete(layer));
+      ownedLayers.clear();
+      return this;
+    },
+    });
+  };
   const L = {
     map: chain, tileLayer: chain, layerGroup: chain, geoJSON: chain,
     circleMarker: (coordinates) => Object.assign(chain(), { coordinates }),
@@ -99,6 +110,7 @@ function startApp(hash = "", { delayLayers = false, delayCatalog = false } = {})
     "data/events.json": [event, otherEvent],
     "data/site_status.json": { recorded_events: 2, plots_available: 1 },
     "data/site_config.json": { map_center: [35.9, -120.5], map_default_zoom: 10 },
+    "data/focal_mechanisms.json": {},
     "data/safod_geometry.geojson": { type: "FeatureCollection", features: [] },
     "data/san_andreas_fault.geojson": {
       type: "FeatureCollection",
@@ -125,6 +137,9 @@ function startApp(hash = "", { delayLayers = false, delayCatalog = false } = {})
     fetch: async (url) => {
       const name = url.split("?")[0];
       assert.ok(name in data, `Unexpected request: ${url}`);
+      if (missingFocal && name === "data/focal_mechanisms.json") {
+        return { ok: false, status: 404, statusText: "Not Found" };
+      }
       if (delayCatalog && name === "data/events.json") await catalogReady;
       if (delayLayers && name.endsWith(".geojson")) {
         await new Promise((resolve) => pendingLayers.push(resolve));
@@ -160,7 +175,7 @@ function assertEventOpen(app, expected = event) {
   assert.ok(app.view.zoom >= 13);
   assert.equal(app.view.animate, false);
   assert.deepEqual(app.popupCoordinates, coordinates);
-  if (expected.plot_available) assert.equal(app.get("dialogPlot").src, expected.plots[0].url);
+  if (expected.plot_available) assert.equal(app.get("dialogPlot").src, `${expected.plots[0].url}?v=test`);
 }
 
 for (const id of ["nc75379261", "75379261", "NC75379261"]) {
@@ -170,6 +185,12 @@ for (const id of ["nc75379261", "75379261", "NC75379261"]) {
     assertEventOpen(app);
   });
 }
+
+test("opens an event when the optional focal-mechanism catalog is absent", async () => {
+  const app = startApp("#event=nc75379261", { missingFocal: true });
+  await nextTurn();
+  assertEventOpen(app);
+});
 
 test("opens the event before optional map layers finish loading", async () => {
   const app = startApp("#event=nc75379261", { delayLayers: true });

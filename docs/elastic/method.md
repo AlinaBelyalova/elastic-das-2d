@@ -237,6 +237,6 @@ candidate»: если график сходимости ведёт себя не
 - Окружение и запуск на Sherlock: [docs/setup.md](../setup.md).
 - Предыстория (adjoint, градиент, временные уровни, замена свободной
   поверхности, вывод и проверки Graves FS1):
-  [handoff 2026-10-08](../history/FWI_SAFOD_FULL_HANDOFF_2026-10-08.md),
+  `docs/history/FWI_SAFOD_FULL_HANDOFF_2026-10-08.md`,
   §E–§M. Файлы `docs/history/` локальные и в Git не входят; указатель —
-  [docs/history/README.md](../history/README.md).
+  `docs/history/README.md`.

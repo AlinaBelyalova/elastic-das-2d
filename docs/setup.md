@@ -187,17 +187,11 @@ grep -rnE '"/oak/|"/home/groups/|/oak/stanford|/home/groups/ettore88' \
   `export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1`.
   В `scripts/safod_deep/plot_catalog_events_array.sbatch` `OMP_NUM_THREADS`
   и `NUMBA_NUM_THREADS` равны `$SLURM_CPUS_PER_TASK`.
-- Oak при импорте: `scripts/safod/settings.py` при импорте ищет HDF5 события
-  `SAFOD_EVENT_KEY` (по умолчанию `nc75379261`) и бросает
-  `FileNotFoundError`, если файла нет; неизвестный ключ — `ValueError`.
-  `settings` импортируют `scripts.safod.prepare_event`,
-  `scripts.safod.selection.screen_events`, `scripts.safod.run_forward`,
-  `scripts.safod.compare_event`,
-  `scripts.safod.velocity_models.zhang2009.extract_safod_section`,
-  `scripts.safod.velocity_models.zhang2009.qc_registration` и
-  `tests/test_safod_smooth_prior_explicit_bounds.py`. Им нужен смонтированный
-  `/oak` (в задании на вычислительном узле он есть). Остальные скрипты
-  обращаются к Oak только во время работы.
+- Импорт `scripts/safod/settings.py` не обращается к Oak. Он выбирает событие
+  `SAFOD_EVENT_KEY` (по умолчанию `nc75379261`); неизвестный ключ вызывает
+  `ValueError`. `prepare_event.main()` вызывает `get_selected_files()` до
+  запроса каталога и чтения данных: отсутствие HDF5 по-прежнему вызывает
+  `FileNotFoundError`. Независимые тесты модели могут работать без `/oak`.
 - `sbatch` — только из корня: `#SBATCH --output/--error` в файлах проекта
   относительные, Slurm отсчитывает их от каталога отправки и каталог для
   логов не создаёт:
@@ -236,7 +230,8 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 | Файл | Что проверяет | Условия |
 |---|---|---|
 | `tests/test_project_layout.py` | текст проекта: нет старых имён модулей и путей; цели `python -m` в `.md`, `.sbatch`, `.sh`, `.ipynb` находятся; относительные ссылки в `.md` не битые и не выходят из проекта | код проекта не исполняет |
-| `tests/test_safod_smooth_prior_explicit_bounds.py` | явные границы сетки в `src.safod.models.smooth_prior.build_smooth_prior_model` | импортирует `scripts.safod.settings`, нужен `/oak` |
+| `tests/test_safod_smooth_prior_explicit_bounds.py` | явные границы сетки в `src.safod.models.smooth_prior.build_smooth_prior_model` | синтетическая геометрия, `/oak` не нужен |
+| `tests/test_safod_settings.py` | импорт настроек без поиска данных; строгая проверка файлов при подготовке события | `/oak` не нужен |
 | `web_safod/tests/test_web_safod.py` | builder `web_safod` ([web_safod/README.md](../web_safod/README.md)) | — |
 
 Голый `pytest` работает, пока подхватывается `pytest.ini` (запуск из корня или
@@ -256,8 +251,8 @@ Node.js в `fwi` нет. Проверить, есть ли `node` в оболо�
 `/home/groups/ettore88/alina/.envs/cursor-node/bin/node`, v20.20.2; в `geo`
 есть `bin/node`, v22.6.0). Модули Sherlock: `ml spider nodejs` (на
 2026-10-16 — 20.20.0, 24.13.0, 25.3.0, загрузка `ml devel nodejs/20.20.0`).
-Если функции `ml` в оболочке нет, — `bash -lc 'ml spider nodejs'`. Известные
-падения `test_app.cjs` описаны в [web_safod/README.md](../web_safod/README.md).
+Если функции `ml` в оболочке нет, — `bash -lc 'ml spider nodejs'`.
+Проверки интерфейса описаны в [web_safod/README.md](../web_safod/README.md).
 
 ## 7. `requirements.txt`
 

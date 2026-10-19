@@ -54,7 +54,7 @@ from scripts.safod.settings import (
     SAFOD_SURFACE_ELEVATION_M,
     SAFOD_WELLHEAD_LAT_WGS84,
     SAFOD_WELLHEAD_LON_WGS84,
-    SELECTED_FILES,
+    get_selected_files,
 )
 from src.common.signal_processing import bandpass_traces
 
@@ -1568,6 +1568,7 @@ def project_event_to_model(mapping: dict, event_meta: dict) -> dict:
 # ==============================================================================
 
 def main() -> None:
+    selected_files = get_selected_files()
     # --------------------------------------------------------------------------
     # 0. Fetch real catalog event metadata first
     # --------------------------------------------------------------------------
@@ -1580,7 +1581,7 @@ def main() -> None:
     # --------------------------------------------------------------------------
     print("\nReading real DAS files...")
     DAS_data, info = DASutils.readFile_HDF(
-        SELECTED_FILES,
+        selected_files,
         0.01,
         500.0,
         verbose=1,
@@ -1594,7 +1595,7 @@ def main() -> None:
         system="OptaSense",
     )
 
-    db_headers = read_das_db_headers(SELECTED_FILES)
+    db_headers = read_das_db_headers(selected_files)
 
     valid_headers = db_headers[
         (pd.to_numeric(db_headers["dCh"], errors="coerce") > 0.0)
@@ -1928,7 +1929,7 @@ def main() -> None:
         ),
         projection_fit_rms_m=np.array(mapping["fit_rms_m"]),
 
-        selected_files=np.array(SELECTED_FILES),
+        selected_files=np.array(selected_files),
         temporal_filter=np.array("none"),
         preview_fmin_hz=np.array(FMIN),
         preview_fmax_hz=np.array(FMAX),
