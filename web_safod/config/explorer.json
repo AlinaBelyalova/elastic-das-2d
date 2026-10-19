@@ -1,0 +1,25 @@
+{
+  "catalog": "results/safod_deep/catalog/catalog_recorded.csv",
+  "event_qc_dir": "results/safod_deep/event_qc",
+  "event_metadata_dir": "results/safod_deep/event_qc/metadata",
+  "geometry_xlsx": "/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx",
+  "site_dir": "web_safod/site",
+  "fault_geojson": "web_safod/reference/san_andreas_fault.geojson",
+  "pages_checkout": "/home/groups/ettore88/alina/classes/geophys245/safod-event-explorer-pages",
+  "web_image_format": "webp",
+  "web_image_max_long_edge_px": 2200,
+  "web_image_quality": 85,
+  "map_center": [
+    35.9742039,
+    -120.5521414
+  ],
+  "map_default_zoom": 10,
+  "fault_bbox": [
+    -121.4,
+    35.4,
+    -119.9,
+    36.6
+  ],
+  "fault_arcgis_layer": "https://earthquake.usgs.gov/arcgis/rest/services/haz/Qfaults/MapServer/4/query",
+  "public_event_page_template": "https://earthquake.usgs.gov/earthquakes/eventpage/{event_id}/"
+}

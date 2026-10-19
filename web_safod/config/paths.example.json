@@ -1,0 +1,7 @@
+{
+  "_comment": "Optional machine-specific overrides. Copy to paths.local.json; that file is gitignored.",
+  "catalog": "results/safod_deep/catalog/catalog_recorded.csv",
+  "event_qc_dir": "results/safod_deep/event_qc",
+  "event_metadata_dir": "results/safod_deep/event_qc/metadata",
+  "geometry_xlsx": "/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx"
+}

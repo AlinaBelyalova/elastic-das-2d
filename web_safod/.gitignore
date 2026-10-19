@@ -1,0 +1,17 @@
+# Machine-specific path overrides
+config/paths.local.json
+
+# Local build cache
+cache/*
+!cache/README.md
+
+# Generated public site (rebuilt by update_event_explorer); keep only the README
+site/*
+!site/README.md
+
+# Local cached fault layer; reproducible from USGS
+reference/san_andreas_fault.geojson
+
+# Python
+__pycache__/
+*.py[cod]

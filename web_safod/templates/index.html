@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Interactive SAFOD Deep-DAS earthquake explorer">
+  <title>SAFOD Deep-DAS Earthquake Explorer</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    crossorigin=""
+  >
+  <link rel="stylesheet" href="style.css?v=__BUILD_ID__">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>SAFOD Deep-DAS Earthquake Explorer</h1>
+      <p class="subtitle">
+        Recorded earthquakes around SAFOD · interactive catalog + DAS event QC
+      </p>
+    </div>
+    <div id="statusSummary" class="status-summary">Loading…</div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar" aria-label="Event filters">
+      <section class="panel">
+        <h2>Filters</h2>
+
+        <label class="field">
+          <span>Search</span>
+          <input id="searchInput" type="search" placeholder="event ID or location">
+        </label>
+
+        <div class="field">
+          <span title="Catalog depth relative to sea level; negative values are above sea level.">Catalog depth ⓘ</span>
+          <div class="range-values">
+            <output id="depthMinLabel"></output>
+            <span>—</span>
+            <output id="depthMaxLabel"></output>
+          </div>
+          <input id="depthMin" type="range" step="0.1">
+          <input id="depthMax" type="range" step="0.1">
+        </div>
+
+        <div class="field">
+          <span>Magnitude range</span>
+          <div class="range-values">
+            <output id="magMinLabel"></output>
+            <span>—</span>
+            <output id="magMaxLabel"></output>
+          </div>
+          <input id="magMin" type="range" step="0.1">
+          <input id="magMax" type="range" step="0.1">
+        </div>
+
+        <div class="field">
+          <span title="Minimum 3-D distance from the earthquake hypocenter to the SAFOD cable trajectory.">Hypocenter–cable distance ⓘ</span>
+          <div class="range-values">
+            <output id="distanceMinLabel"></output>
+            <span>—</span>
+            <output id="distanceMaxLabel"></output>
+          </div>
+          <input id="distanceMin" type="range" step="0.1">
+          <input id="distanceMax" type="range" step="0.1">
+        </div>
+
+        <div class="field two-col">
+          <label>
+            <span>Date from</span>
+            <input id="dateFrom" type="date">
+          </label>
+          <label>
+            <span>Date to</span>
+            <input id="dateTo" type="date">
+          </label>
+        </div>
+
+        <label class="field">
+          <span>2-D geometry</span>
+          <select id="geometryFilter">
+            <option value="">All</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Recording</span>
+          <select id="recordingFilter">
+            <option value="">All</option>
+          </select>
+        </label>
+
+        <label class="checkbox-field">
+          <input id="onlyWithPlots" type="checkbox">
+          <span>Only events with DAS plots</span>
+        </label>
+
+        <button id="resetFilters" type="button" class="button secondary">
+          Reset filters
+        </button>
+      </section>
+
+      <section class="panel">
+        <h2>Visible events</h2>
+        <div id="visibleCount" class="big-number">—</div>
+        <div id="filterSummary" class="small-muted"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Legend</h2>
+        <div class="legend-row">
+          <span>Depth</span>
+          <div class="depth-gradient"></div>
+          <div class="legend-labels">
+            <span>shallow</span><span>deep</span>
+          </div>
+        </div>
+        <div class="magnitude-legend">
+          <span class="mag-dot mag-small"></span><span>M small</span>
+          <span class="mag-dot mag-medium"></span><span>M ~1–2</span>
+          <span class="mag-dot mag-large"></span><span>M larger</span>
+        </div>
+        <div class="line-legend">
+          <span class="fault-swatch"></span><span>San Andreas Fault</span>
+        </div>
+        <div class="line-legend">
+          <span class="fibre-swatch"></span><span>SAFOD fibre</span>
+        </div>
+        <div class="line-legend">
+          <span class="fm-swatch" aria-hidden="true"></span><span>Focal mechanism (where available)</span>
+        </div>
+      </section>
+
+      <section class="panel provenance">
+        <h2>Data</h2>
+        <div id="coverageText">Loading…</div>
+        <div id="updatedText"></div>
+        <div id="plotCountText"></div>
+        <div id="focalCountText"></div>
+      </section>
+    </aside>
+
+    <section class="map-shell">
+      <div class="map-tools" aria-label="Map tools">
+        <button id="measureDistance" type="button" class="map-tool-button">Measure distance</button>
+        <button id="toggleFocalMechanisms" type="button" class="map-tool-button hidden" aria-pressed="false">Show focal mechanisms</button>
+        <button id="clearMeasurement" type="button" class="map-tool-button secondary hidden">Clear</button>
+        <span id="measureStatus" class="measure-status hidden"></span>
+      </div>
+      <div id="map" aria-label="Interactive SAFOD earthquake map"></div>
+      <div id="mapNotice" class="map-notice hidden"></div>
+    </section>
+  </main>
+
+  <dialog id="eventDialog" class="event-dialog">
+    <div class="dialog-header">
+      <div>
+        <h2 id="dialogTitle">Event</h2>
+        <div id="dialogSubtitle" class="small-muted"></div>
+      </div>
+      <button id="closeDialog" type="button" class="icon-button" aria-label="Close">×</button>
+    </div>
+
+    <div class="dialog-body">
+      <div id="dialogMetadata" class="metadata-grid"></div>
+
+      <div id="plotSelectorWrap" class="field hidden">
+        <label>
+          <span>DAS view</span>
+          <select id="plotSelector"></select>
+        </label>
+      </div>
+
+      <div class="plot-toolbar">
+        <button
+          id="arrivalsToggle"
+          type="button"
+          class="button secondary hidden"
+          aria-pressed="false"
+        >
+          Show P/S arrivals
+        </button>
+      </div>
+
+      <div id="plotUnavailable" class="empty-plot hidden">
+        DAS plot is not available for this event.
+      </div>
+
+      <a id="plotLink" class="plot-link hidden" href="#" target="_blank" rel="noopener">
+        <img id="dialogPlot" alt="DAS event plot" loading="lazy">
+      </a>
+    </div>
+
+    <div class="dialog-footer">
+      <a id="officialEventLink" class="button" href="#" target="_blank" rel="noopener">
+        Open earthquake page
+      </a>
+      <a id="fullImageLink" class="button secondary hidden" href="#" target="_blank" rel="noopener">
+        Open full web image
+      </a>
+    </div>
+  </dialog>
+
+  <script>
+    window.SAFOD_BUILD_ID = "__BUILD_ID__";
+  </script>
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    crossorigin=""
+  ></script>
+  <script src="app.js?v=__BUILD_ID__"></script>
+</body>
+</html>
