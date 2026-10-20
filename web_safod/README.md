@@ -1,7 +1,7 @@
 # SAFOD Deep-DAS Interactive Event Explorer
 
-Статический сайт для просмотра событий архива SAFOD-deep: карта, каталог и QC-рисунки DAS.
-Собирается из `results/safod_deep/`; обычная команда — `update_event_explorer` (ниже), публикация — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+A static site for viewing events of the SAFOD-deep archive: map, catalog and DAS QC plots.
+Built from `results/safod_deep/`; the normal command is `update_event_explorer` (below), publishing is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 Static public earthquake/DAS viewer for SAFOD. "SAFOD-deep" is the name of the
 continuous deep-fibre DAS archive, not a selection of deep events.

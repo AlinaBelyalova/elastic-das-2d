@@ -1,113 +1,115 @@
-# Результаты расчётов
+# Computed results
 
-Здесь лежит всё вычисленное: отчёты, JSON/CSV, массивы, рисунки и логи.
-Отчёт, числа, рисунки и лог одного запуска хранятся в его папке. Методика —
-в `docs/`, расположение кода — в [карте проекта](../docs/project_map.md).
+Everything computed lives here: reports, JSON/CSV, arrays, figures and logs.
+The report, numbers, figures and log of a single run are kept in its folder.
+Methodology is in `docs/`, code locations are in the
+[project map](../docs/project_map.md).
 
-Содержимое `results/` локальное и исключено из Git (`results/*` в
-`.gitignore`); версионируется только этот README.
+The contents of `results/` are local and excluded from Git (`results/*` in
+`.gitignore`); only this README is versioned.
 
-## Разделы
+## Sections
 
-| Папка | Кто создаёт | Содержимое |
+| Folder | Created by | Contents |
 | --- | --- | --- |
-| `validation/sbp_sat/<запуск>/` | `scripts.validation.sbp_sat.oblique_qc`, `time_energy_qc` с `--output-dir` | `oblique/`, `time_energy/` (`summary.json`, `traces.npz`, PNG с `--plot`); общий `validation_report.md` запуска пишется вручную, скрипты его не создают. Сейчас: `reference_v2/`, `sherlock_20261016/` |
-| `validation/elastic/<проверка>/` | `scripts/validation/elastic/` | по папке на каждый скрипт, который пишет файлы: `boundary_absorption/`, `free_surface_normal_incidence/`, `magnitude_scaling/`, `moment_tensor_analytical/`, `moment_tensor_linearity/`, `pointforce_2d/`, `reciprocity/`, `source_radiation/` |
-| `validation/fwi/<проверка>/` | `scripts/validation/fwi/` | `two_layer_numba/`, `two_layer_taylor/` |
-| `examples/homogeneous_demo/` | `scripts.examples.homogeneous_demo` | однородный демонстрационный расчёт, `explosive_validation/` |
-| `benchmarks/performance/` | `scripts.benchmarks.performance` | сейчас только `benchmark_scaling_free_surface_true.json`; PNG скрипт создаёт при каждом запуске (вместе с JSON, перезаписывая их) |
-| `events/<YYYYMMDD_номер>/` | конвейер `scripts/safod/` | одно событие SAFOD, раскладка ниже |
+| `validation/sbp_sat/<run>/` | `scripts.validation.sbp_sat.oblique_qc`, `time_energy_qc` with `--output-dir` | `oblique/`, `time_energy/` (`summary.json`, `traces.npz`, PNG with `--plot`); the run-level `validation_report.md` is written by hand, the scripts do not create it. Currently: `reference_v2/`, `sherlock_20261016/` |
+| `validation/elastic/<check>/` | `scripts/validation/elastic/` | one folder per script that writes files: `boundary_absorption/`, `free_surface_normal_incidence/`, `magnitude_scaling/`, `moment_tensor_analytical/`, `moment_tensor_linearity/`, `pointforce_2d/`, `reciprocity/`, `source_radiation/` |
+| `validation/fwi/<check>/` | `scripts/validation/fwi/` | `two_layer_numba/`, `two_layer_taylor/` |
+| `examples/homogeneous_demo/` | `scripts.examples.homogeneous_demo` | homogeneous demo run, `explosive_validation/` |
+| `benchmarks/performance/` | `scripts.benchmarks.performance` | currently only `benchmark_scaling_free_surface_true.json`; the script creates the PNG on every run (together with the JSON, overwriting both) |
+| `events/<YYYYMMDD_number>/` | `scripts/safod/` pipeline | one SAFOD event, layout below |
 | `safod/` | `scripts/safod/selection/` | `catalog_search/` (`find_catalog_events`, `check_catalog_coverage`); `event_screening.csv` (`screen_events`) |
-| `safod_deep/` | `scripts/safod_deep/`, `web_safod` | архив SAFOD-deep, раскладка ниже |
-| `legacy/` | прежние версии кода | старые расчёты и манифесты переносов, индекс ниже |
+| `safod_deep/` | `scripts/safod_deep/`, `web_safod` | SAFOD-deep archive, layout below |
+| `legacy/` | earlier code versions | old runs and migration manifests, index below |
 
-Проверки, которые только печатают результат (например `operator_qc`),
-папок не создают; список — в
+Checks that only print their result (for example `operator_qc`) create no
+folders; the list is in
 [scripts/validation/README.md](../scripts/validation/README.md).
 
-## Событие SAFOD
+## SAFOD event
 
-Событие выбирается переменной `SAFOD_EVENT_KEY=nc<номер>` и должно быть
-внесено в `scripts/safod/settings.py` (реестр `EVENTS` и `aliases`). Имя папки —
-`EVENT_RESULT_KEY` = дата origin time и номер, например `nc75379261` →
-`events/20260618_75379261/`. Порядок запуска — в
-[docs/safod/workflow.md](../docs/safod/workflow.md).
+The event is selected with the variable `SAFOD_EVENT_KEY=nc<number>` and must
+be registered in `scripts/safod/settings.py` (the `EVENTS` registry and
+`aliases`). The folder name is `EVENT_RESULT_KEY` = origin-time date and
+number, for example `nc75379261` → `events/20260618_75379261/`. Run order is
+in [docs/safod/workflow.md](../docs/safod/workflow.md).
 
 ```text
-events/<YYYYMMDD_номер>/
-├── real/                            prepare_event: real_das_event_window.npz, геометрия, превью
-│   └── channel_registration_qc/     calibrate_channel_registration (--out-dir), если регистрация каналов другая
+events/<YYYYMMDD_number>/
+├── real/                            prepare_event: real_das_event_window.npz, geometry, previews
+│   └── channel_registration_qc/     calibrate_channel_registration (--out-dir), if channel registration differs
 ├── forward/dc<θ>/<initial_model>/   run_forward
 ├── compare/dc<θ>/<initial_model>/   compare_event
-├── compare/<анализ>[_YYYYMMDD]/     прочие сравнения, например DAS и геофон
-└── logs/                            вывод запусков (скрипты сами лог не пишут)
+├── compare/<analysis>[_YYYYMMDD]/   other comparisons, for example DAS vs geophone
+└── logs/                            run output (the scripts do not write logs themselves)
 ```
 
-`dc<θ>` — значение `--theta-deg` (ориентация 2-D double couple) в целых
-градусах, три цифры (`dc035` для 35°).
-`<initial_model>` — значение `--initial-model`.
+`dc<θ>` is the value of `--theta-deg` (2-D double couple orientation) in whole
+degrees, three digits (`dc035` for 35°).
+`<initial_model>` is the value of `--initial-model`.
 
-Сохраняются по соглашению handoff 2026-08-14 (не переименовываются):
+Kept per the 2026-08-14 handoff convention (not renamed):
 
 - `events/20260401_75336802/{forward,compare}/dc035/legacy_unversioned/` —
-  апрельские расчёты до разделения по именам моделей;
-- `events/20260618_75379261/{forward,compare}/dc035/digitized_log/` — прежнее
-  имя модели `bill_logs`.
+  April runs from before the split by model name;
+- `events/20260618_75379261/{forward,compare}/dc035/digitized_log/` — former
+  model name `bill_logs`.
 
-В `events/20260401_75336802/` анализы с суффиксом `_20260807` — поколение
-2026-08-07, перенесённое из `real/`; `compare/das_geophone_physical_pairs/` —
-папка по умолчанию `plot_das_geophone_two_physical_comparisons`. Файлы
-`real/*_0_15s*` (2026-07-08) названы по схеме прежнего скрипта подготовки
-(как в `scripts/legacy/prepare_real_event_20260413.py`); текущий
-`prepare_event` их не пишет.
+In `events/20260401_75336802/`, analyses with the `_20260807` suffix are the
+2026-08-07 generation moved out of `real/`;
+`compare/das_geophone_physical_pairs/` is the default folder of
+`plot_das_geophone_two_physical_comparisons`. The files `real/*_0_15s*`
+(2026-07-08) follow the naming scheme of the earlier preparation script (as in
+`scripts/legacy/prepare_real_event_20260413.py`); the current `prepare_event`
+does not write them.
 
-## Архив SAFOD-deep
+## SAFOD-deep archive
 
-| Папка | Кто создаёт | Содержимое |
+| Folder | Created by | Contents |
 | --- | --- | --- |
-| `safod_deep/catalog/` | `scan_nano_manifest`, `build_event_catalog`; `focal_mechanisms.json` — `web_safod.scripts.fetch_focal_mechanisms` | манифесты записей, каталог NCEDC, обзорные рисунки, `CATALOG_NOTES.md`; для `recording_manifest_pre_nano.csv` скрипта-источника в проекте нет |
-| `safod_deep/geometry/` | `plot_catalog_events --prepare-geometry` | `acquisition_registration.json` и QC-рисунок: регистрация конфигураций записи на физическую геометрию кабеля. Для `nano_mapping.csv` и `nano_registration.*` скрипта-источника в проекте нет (уточнить у автора) |
-| `safod_deep/event_qc/` | `plot_catalog_events`, `plot_catalog_events_array.sbatch` | QC-галерея событий и `metadata/`; её читает `web_safod` (`web_safod/config/explorer.json`) |
-| `safod_deep/event_qc_1_20Hz/`, `event_qc_3_15Hz/`, `event_qc_5_30Hz/`, `event_qc_adaptive/` | более ранние запуски (август 2026) | прежние варианты галереи; `web_safod` их не читает |
-| `safod_deep/event_qc_pretty_two/` | `scripts/legacy/safod_deep/plot_two_selected_events_pretty.py` | рисунки двух выбранных событий; скрипт сейчас не запускается |
-| `safod_deep/logs/` | Slurm | логи `plot_catalog_events_array.sbatch` |
+| `safod_deep/catalog/` | `scan_nano_manifest`, `build_event_catalog`; `focal_mechanisms.json` — `web_safod.scripts.fetch_focal_mechanisms` | recording manifests, NCEDC catalog, overview figures, `CATALOG_NOTES.md`; there is no source script in the project for `recording_manifest_pre_nano.csv` |
+| `safod_deep/geometry/` | `plot_catalog_events --prepare-geometry` | `acquisition_registration.json` and a QC figure: registration of recording configurations to the physical cable geometry. There is no source script in the project for `nano_mapping.csv` and `nano_registration.*` (check with the author) |
+| `safod_deep/event_qc/` | `plot_catalog_events`, `plot_catalog_events_array.sbatch` | event QC gallery and `metadata/`; read by `web_safod` (`web_safod/config/explorer.json`) |
+| `safod_deep/event_qc_1_20Hz/`, `event_qc_3_15Hz/`, `event_qc_5_30Hz/`, `event_qc_adaptive/` | earlier runs (August 2026) | earlier gallery variants; `web_safod` does not read them |
+| `safod_deep/event_qc_pretty_two/` | `scripts/legacy/safod_deep/plot_two_selected_events_pretty.py` | figures of two selected events; the script currently does not run |
+| `safod_deep/logs/` | Slurm | logs of `plot_catalog_events_array.sbatch` |
 
 ## Legacy
 
-| Папка | Содержимое |
+| Folder | Contents |
 | --- | --- |
-| `legacy/mechanism_compare_20260718/` | сравнения реальных и синтетических данных для 20260401_75336802 при θ = 0, 15, 30, 45, 60, 75° (июль 2026, прежняя схема имён) |
-| `legacy/migrations/` | `results_reorg_20260807_223722.txt` — манифест переноса результатов 2026-08-07 |
-| `legacy/numpy_homogeneous_baseline_20260604/` | прежний однородный расчёт NumPy (2026-06-04) |
-| `legacy/real_event_20260413_M153/` | подготовка события 2026-04-13 скриптом `scripts/legacy/prepare_real_event_20260413.py`; какие файлы он пишет — в [scripts/legacy/README.md](../scripts/legacy/README.md) |
-| `legacy/safod_initial_model_20260629/` | прежняя начальная модель SAFOD: `safod_initial_model.npz` и рисунки Vp, Vs, rho |
+| `legacy/mechanism_compare_20260718/` | real vs synthetic comparisons for 20260401_75336802 at θ = 0, 15, 30, 45, 60, 75° (July 2026, earlier naming scheme) |
+| `legacy/migrations/` | `results_reorg_20260807_223722.txt` — manifest of the 2026-08-07 results migration |
+| `legacy/numpy_homogeneous_baseline_20260604/` | earlier homogeneous NumPy run (2026-06-04) |
+| `legacy/real_event_20260413_M153/` | 2026-04-13 event preparation by `scripts/legacy/prepare_real_event_20260413.py`; which files it writes is in [scripts/legacy/README.md](../scripts/legacy/README.md) |
+| `legacy/safod_initial_model_20260629/` | earlier SAFOD initial model: `safod_initial_model.npz` and Vp, Vs, rho figures |
 
-Индекс старого кода — [scripts/legacy/README.md](../scripts/legacy/README.md),
-прежние handoff и переносы — [docs/history/README.md](../docs/history/README.md).
+Index of old code: [scripts/legacy/README.md](../scripts/legacy/README.md);
+earlier handoffs and migrations: [docs/history/README.md](../docs/history/README.md).
 
-## Правила
+## Rules
 
-- Папка результата = имя скрипта без `_qc`: `free_surface_normal_incidence_qc`
-  → `validation/elastic/free_surface_normal_incidence/`. Для SBP-SAT — папка
-  запуска `validation/sbp_sat/<метка>_<YYYYMMDD>/` с подпапками `oblique/`,
+- Result folder = script name without `_qc`: `free_surface_normal_incidence_qc`
+  → `validation/elastic/free_surface_normal_incidence/`. For SBP-SAT, a run
+  folder `validation/sbp_sat/<label>_<YYYYMMDD>/` with subfolders `oblique/`,
   `time_energy/`.
-- Каждый новый запуск получает новое имя. `oblique_qc` и `time_energy_qc`
-  отказываются писать в непустую папку без `--overwrite`; `run_forward`
-  без `--overwrite` не заменяет существующий forward NPZ. Архивные
-  `reference_v2/` и `sherlock_20261016/` не перезаписываются.
-- Логи Slurm — в `results/<область>/logs/` (для события —
-  `events/<YYYYMMDD_номер>/logs/`). Slurm сам папку не создаёт: `mkdir -p`
-  перед `sbatch`. Логи сборки сайта — в `web_safod/cache/`, сам сайт — в
-  `web_safod/site/`.
-- Исключение: QC подготовки скоростных моделей лежит рядом с входами в
-  `data/safod/velocity_models/<источник>/qc/`.
-- Большие запуски на Sherlock можно вести в `$SCRATCH` или `$GROUP_SCRATCH`
-  с той же раскладкой. Эти пространства очищаются, поэтому единственная
-  сохраняемая копия должна лежать на постоянном хранилище.
+- Every new run gets a new name. `oblique_qc` and `time_energy_qc` refuse to
+  write into a non-empty folder without `--overwrite`; `run_forward` without
+  `--overwrite` does not replace an existing forward NPZ. The archived
+  `reference_v2/` and `sherlock_20261016/` are not overwritten.
+- Slurm logs go to `results/<area>/logs/` (for an event,
+  `events/<YYYYMMDD_number>/logs/`). Slurm does not create the folder itself:
+  run `mkdir -p` before `sbatch`. Site build logs go to `web_safod/cache/`, the
+  site itself to `web_safod/site/`.
+- Exception: QC of velocity model preparation sits next to the inputs in
+  `data/safod/velocity_models/<source>/qc/`.
+- Large runs on Sherlock can be done in `$SCRATCH` or `$GROUP_SCRATCH` with
+  the same layout. These spaces are purged, so the only copy that must be kept
+  has to be on permanent storage.
 
 ## SBP-SAT
 
-- [Локальный запуск Sherlock 2026-10-16](validation/sbp_sat/sherlock_20261016/validation_report.md)
-- [Исходный эталон QC v2](validation/sbp_sat/reference_v2/validation_report.md)
-- Методика и команды запуска — [docs/sbp_sat/validation.md](../docs/sbp_sat/validation.md);
-  сверка запусков — [docs/status.md](../docs/status.md)
+- [Local Sherlock run 2026-10-16](validation/sbp_sat/sherlock_20261016/validation_report.md)
+- [Original QC v2 reference](validation/sbp_sat/reference_v2/validation_report.md)
+- Methodology and run commands: [docs/sbp_sat/validation.md](../docs/sbp_sat/validation.md);
+  run comparison: [docs/status.md](../docs/status.md)

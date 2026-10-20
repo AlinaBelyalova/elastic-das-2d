@@ -1,7 +1,7 @@
 # SBP-SAT validation: checks and acceptance criteria
 
-Кратко: единственное место с командами проверок SBP-SAT, правила записи результатов и критерии приёмки тестов oblique и time-energy.
-Формулы — в [method.md](method.md), список всех проверок со временем — в [scripts/validation/README.md](../../scripts/validation/README.md), текущий этап — в [docs/status.md](../status.md).
+In short: the only place with the SBP-SAT check commands, the rules for writing results, and the acceptance criteria of the oblique and time-energy tests.
+Formulas are in [method.md](method.md), the list of all checks with runtimes is in [scripts/validation/README.md](../../scripts/validation/README.md), the current stage is in [docs/status.md](../status.md).
 
 ## Provenance
 

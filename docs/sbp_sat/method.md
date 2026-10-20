@@ -1,7 +1,7 @@
 # SBP-SAT mathematical specification
 
-Кратко: математическая спецификация NumPy-прототипа SBP-SAT в `src/sbp_sat/` (уравнения, сетки, SBP-операторы, SAT, временные уровни, сопряжённый оператор и градиент) и соответствие формул функциям и проверкам.
-Команды проверок — в [validation.md](validation.md), таблица всех проверок — в [scripts/validation/README.md](../../scripts/validation/README.md), текущий этап — в [docs/status.md](../status.md).
+In short: the mathematical specification of the NumPy SBP-SAT prototype in `src/sbp_sat/` (equations, grids, SBP operators, SAT, time levels, adjoint operator and gradient) and the mapping of formulas to functions and checks.
+Check commands are in [validation.md](validation.md), the table of all checks is in [scripts/validation/README.md](../../scripts/validation/README.md), the current stage is in [docs/status.md](../status.md).
 
 This is the specification of the existing NumPy reference in `src/sbp_sat/`.
 The controlled problem is 2D isotropic velocity-stress elasticity, periodic

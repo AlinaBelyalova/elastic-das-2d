@@ -1,19 +1,20 @@
-# Окружение, данные и тесты
+# Environments, data and tests
 
-Как работать с проектом на Sherlock: окружения Python, локальные пакеты не из
-PyPI, входные данные, зашитые в код внешние пути, запуск и тесты. Всё ниже
-проверено 2026-10-16 в задании на вычислительном узле (импорт, `ls`, `grep`,
-`importlib.metadata`); расчёты не запускались. Где что лежит в проекте —
-[project_map.md](project_map.md), шаги SAFOD — [safod/workflow.md](safod/workflow.md).
+How to work with the project on Sherlock: Python environments, local non-PyPI
+packages, input data, external paths hard-coded in the code, running and
+tests. Everything below was checked on 2026-10-16 in a job on a compute node
+(import, `ls`, `grep`, `importlib.metadata`); no computations were run. Where
+things are in the project:
+[project_map.md](project_map.md), SAFOD steps: [safod/workflow.md](safod/workflow.md).
 
-## 1. Окружения
+## 1. Environments
 
-Два conda-окружения. Активировать их не нужно: достаточно вызывать
-интерпретатор по полному пути (`<окружение>/bin/python`).
+Two conda environments. They do not need to be activated: it is enough to call
+the interpreter by its full path (`<environment>/bin/python`).
 
 |  | `fwi` | `geo` |
 |---|---|---|
-| Путь | `/home/groups/ettore88/alina/.envs/fwi` | `/home/groups/ettore88/alina/.envs/geo` |
+| Path | `/home/groups/ettore88/alina/.envs/fwi` | `/home/groups/ettore88/alina/.envs/geo` |
 | Python | 3.11.13 | 3.9.23 |
 | numpy | 2.0.1 | 1.26.4 |
 | scipy | 1.16.0 | 1.13.1 |
@@ -26,120 +27,121 @@ PyPI, входные данные, зашитые в код внешние пу�
 | python-dateutil | 2.9.0.post0 | 2.9.0.post0 |
 | openpyxl | 3.1.5 | 3.1.5 |
 | Pillow | 12.1.1 | 11.3.0 |
-| pytest | 9.0.2 | нет |
-| pykonal | нет | 0.4.1 |
-| ipykernel / jupyterlab / notebook | 7.2.0 / 4.5.5 / 7.5.4 | 6.30.1 / 4.4.6 / нет |
+| pytest | 9.0.2 | no |
+| pykonal | no | 0.4.1 |
+| ipykernel / jupyterlab / notebook | 7.2.0 / 4.5.5 / 7.5.4 | 6.30.1 / 4.4.6 / no |
 
-Метапакета `jupyter` нет ни в одном окружении, но команда `jupyter` есть в
-обоих. В `fwi` также стоит devito (editable-установка); кодом проекта он не
-импортируется, но из-за него вне корня проекта находится чужой пакет
-`scripts` (раздел 5).
+The `jupyter` metapackage is in neither environment, but the `jupyter` command
+exists in both. `fwi` also has devito (editable install); project code does
+not import it, but because of it a foreign `scripts` package is found outside
+the project root (section 5).
 
-**`fwi`** — основное окружение: `src/`, `scripts/validation/`,
+**`fwi`** is the main environment: `src/`, `scripts/validation/`,
 `scripts/examples/`, `scripts/benchmarks/`, `scripts.safod.run_forward`,
-`scripts.safod.compare_event`, `web_safod/`, тесты (pytest есть только здесь).
+`scripts.safod.compare_event`, `web_safod/`, tests (pytest is only here).
 
-**`geo`** нужен всему, что импортирует `DASutils`: тот импортирует `pyDAS`,
-а `pyDAS` собран только под Python 3.9
-(`DAS-utilities/build/pyDAS.cpython-39-x86_64-linux-gnu.so`). В `fwi` эти
-модули падают с `ModuleNotFoundError: No module named 'pyDAS'`:
+**`geo`** is needed by everything that imports `DASutils`: it imports `pyDAS`,
+and `pyDAS` is built only for Python 3.9
+(`DAS-utilities/build/pyDAS.cpython-39-x86_64-linux-gnu.so`). In `fwi` these
+modules fail with `ModuleNotFoundError: No module named 'pyDAS'`:
 
-- уже при импорте: `scripts.safod.prepare_event`,
-  `scripts.safod.selection.screen_events` (импортирует `prepare_event`),
+- already at import: `scripts.safod.prepare_event`,
+  `scripts.safod.selection.screen_events` (imports `prepare_event`),
   `scripts.safod.plot_das_geophone_two_physical_comparisons`,
-  `scripts.safod_deep.plot_catalog_events`, все
+  `scripts.safod_deep.plot_catalog_events`, all
   `scripts.safod.experiments.oct03_2026.*`;
-- во время работы (импорт в `fwi` проходит):
-  `scripts.safod.calibrate_channel_registration` (`DASutils` при чтении
+- at run time (import in `fwi` succeeds):
+  `scripts.safod.calibrate_channel_registration` (`DASutils` when reading
   HDF5), `scripts.safod.selection.check_catalog_coverage` (`DAS_db.py`
-  импортирует `DASutils`);
-- ноутбук `notebooks/NC75379261_DAS_geophone.ipynb`.
+  imports `DASutils`);
+- the notebook `notebooks/NC75379261_DAS_geophone.ipynb`.
 
-P/S-годографы в `scripts.safod_deep.plot_catalog_events` считаются через
-EikoHypoTomo, которому нужен `pykonal` (есть только в `geo`).
+P/S travel-time curves in `scripts.safod_deep.plot_catalog_events` are computed
+with EikoHypoTomo, which needs `pykonal` (only in `geo`).
 
-В `geo` импортируются все модули `src/`, `scripts/` (кроме `scripts/legacy/`)
-и `web_safod/`, в `fwi` — все, кроме перечисленных выше. Остальным скриптам
-`pyDAS` не нужен, для них берётся `fwi`. Импорт не значит, что скрипт в этом
-окружении запускали: для `scripts.safod_deep.scan_nano_manifest`,
+In `geo` all modules of `src/`, `scripts/` (except `scripts/legacy/`) and
+`web_safod/` import; in `fwi`, all except those listed above. The other
+scripts do not need `pyDAS`; `fwi` is used for them. Importing does not mean
+the script was run in that environment: for `scripts.safod_deep.scan_nano_manifest`,
 `scripts.safod_deep.build_event_catalog`,
 `scripts.safod.selection.find_catalog_events`,
-`scripts.safod.experiments.diagnose_geometry` и
-`scripts.safod.velocity_models.*` окружение прежних запусков нигде не
-записано.
+`scripts.safod.experiments.diagnose_geometry` and
+`scripts.safod.velocity_models.*` the environment of earlier runs is not
+recorded anywhere.
 
-### Ноутбуки и ядра Jupyter
+### Notebooks and Jupyter kernels
 
-| Ноутбук | `metadata.kernelspec` | `language_info.version` | Окружение |
+| Notebook | `metadata.kernelspec` | `language_info.version` | Environment |
 |---|---|---|---|
 | `notebooks/final_demo.ipynb` | `name: python3`, `display_name: Python 3` | 3.11.13 | `fwi` |
 | `notebooks/NC75379261_DAS_geophone.ipynb` | `name: python3`, `display_name: geo` | 3.9.23 | `geo` |
 
-Jupyter выбирает ядро по `name`, а `python3` — встроенное ядро того
-окружения, из которого запущен сам Jupyter. Поэтому `final_demo.ipynb`
-открывать в Jupyter из `fwi` (или с ядром `Python (fwi)`),
-`NC75379261_DAS_geophone.ipynb` — в Jupyter из `geo`
-(`/home/groups/ettore88/alina/.envs/geo/bin/jupyter lab`). Оба ноутбука сами
-находят корень проекта, если открыты из корня или из `notebooks/`.
+Jupyter selects the kernel by `name`, and `python3` is the built-in kernel of
+the environment Jupyter itself was started from. So open `final_demo.ipynb`
+in Jupyter from `fwi` (or with the `Python (fwi)` kernel), and
+`NC75379261_DAS_geophone.ipynb` in Jupyter from `geo`
+(`/home/groups/ettore88/alina/.envs/geo/bin/jupyter lab`). Both notebooks
+find the project root themselves if opened from the root or from `notebooks/`.
 
-Пользовательские ядра лежат в `~/.local/share/jupyter/kernels/`, список —
-`jupyter kernelspec list`. На 2026-10-16 ядро `geo` там указывает на
-несуществующий `~/miniconda3/envs/geo/bin/python`, а `geo_cuda/kernel.json`
-не читается (невалидный JSON); `fwi` указывает на
+User kernels are in `~/.local/share/jupyter/kernels/`; list them with
+`jupyter kernelspec list`. As of 2026-10-16 the `geo` kernel there points to
+the non-existent `~/miniconda3/envs/geo/bin/python`, and `geo_cuda/kernel.json`
+cannot be read (invalid JSON); `fwi` points to
 `/home/groups/ettore88/alina/.envs/fwi/bin/python`.
 
-Jupyter — сервер, поэтому запускать его только в задании на вычислительном
-узле (раздел 5), не на логин-узле.
+Jupyter is a server, so run it only in a job on a compute node
+(section 5), not on a login node.
 
-## 2. Локальные пакеты не из PyPI
+## 2. Local non-PyPI packages
 
-Оба пакета не установлены ни в одно окружение (`import DASutils`,
-`import pyVector` вне проекта падают). Скрипты сами добавляют их каталоги в
-`sys.path`, и путь зашит в каждом скрипте отдельно (раздел 4).
+Neither package is installed in any environment (`import DASutils`,
+`import pyVector` fail outside the project). Scripts add their directories to
+`sys.path` themselves, and the path is hard-coded in each script separately
+(section 4).
 
-| Пакет | Что используется | Как код его находит |
+| Package | What is used | How the code finds it |
 |---|---|---|
-| DAS-utilities, `/home/groups/ettore88/alina/packages/DAS-utilities` | `python/DASutils.py`, `python/DAS_db.py`; `build/pyDAS.cpython-39-x86_64-linux-gnu.so` (сборка CMake, только Python 3.9, т.е. `geo`) | скрипт вставляет `build/` и `python/` в начало `sys.path` и добавляет `build/` в `LD_LIBRARY_PATH`; `DAS_db.py` загружается по пути файла (`importlib.util.spec_from_file_location`): `settings.DAS_DB_PY` в `prepare_event` и `selection.screen_events`, своя константа в `selection.check_catalog_coverage`; у `calibrate_channel_registration` корень задаётся `--utilities-root` (по умолчанию тот же путь) |
-| EikoHypoTomo, `/home/groups/ettore88/alina/packages/EikoHypoTomo` | `python/EikonalTomography2DMod.py` (импортирует `pykonal`), `external/python-solver/GenericSolver/python/pyVector.py` | только `scripts.safod_deep.plot_catalog_events`: `_load_eikonal_modules()` при первом eikonal-расчёте добавляет оба каталога в `sys.path` и, если `DATAPATH` не задан, ставит его в `$TMPDIR` (или `/tmp`); ошибки eikonal-расчёта перехватываются (`phase-guide eikonal failed ...`) |
+| DAS-utilities, `/home/groups/ettore88/alina/packages/DAS-utilities` | `python/DASutils.py`, `python/DAS_db.py`; `build/pyDAS.cpython-39-x86_64-linux-gnu.so` (CMake build, Python 3.9 only, i.e. `geo`) | the script inserts `build/` and `python/` at the start of `sys.path` and adds `build/` to `LD_LIBRARY_PATH`; `DAS_db.py` is loaded by file path (`importlib.util.spec_from_file_location`): `settings.DAS_DB_PY` in `prepare_event` and `selection.screen_events`, its own constant in `selection.check_catalog_coverage`; for `calibrate_channel_registration` the root is set by `--utilities-root` (same path by default) |
+| EikoHypoTomo, `/home/groups/ettore88/alina/packages/EikoHypoTomo` | `python/EikonalTomography2DMod.py` (imports `pykonal`), `external/python-solver/GenericSolver/python/pyVector.py` | only `scripts.safod_deep.plot_catalog_events`: `_load_eikonal_modules()` on the first eikonal computation adds both directories to `sys.path` and, if `DATAPATH` is not set, sets it to `$TMPDIR` (or `/tmp`); eikonal computation errors are caught (`phase-guide eikonal failed ...`) |
 
-Собственные зависимости пакетов описаны в их `environment.yml` (у
-DAS-utilities также `requirements.txt`).
+The packages' own dependencies are described in their `environment.yml`
+(DAS-utilities also has `requirements.txt`).
 
-## 3. Входные данные
+## 3. Input data
 
-| Вход | Где | Кто читает |
+| Input | Where | Who reads it |
 |---|---|---|
-| Записи DAS по событиям (HDF5; для эксперимента 2026-10-03 — файлы `.pb`) | `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD_events` | `scripts/safod/settings.py`: `SAFOD_EVENT_DATA_ROOT` и `EVENTS[<ключ>]["input_patterns"]` (ключи `nc75336802`, `nc75379261` — по умолчанию, `nc75336682`; выбор — `SAFOD_EVENT_KEY`); свои копии пути — в `scripts/safod/` `selection/check_catalog_coverage.py`, `selection/screen_events.py`, `experiments/oct03_2026/*`, `plot_das_geophone_two_physical_comparisons.py` |
-| Непрерывный архив SAFOD-deep | 8 корней записи в `config/safod_deep/roots.json` (все под `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/`) | `scripts.safod_deep.build_event_catalog --roots-config` (параметр обязателен); `scripts.safod_deep.scan_nano_manifest --root` (по умолчанию корень `2026-06-Nano`) |
-| Таблица георефер. каналов кабеля | `/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx` (вне проекта и вне git) | `settings.GEO_XLSX` (`prepare_event`); свои копии пути в 6 скриптах (раздел 4); `geometry_xlsx` в `web_safod/config/*.json`; `build_event_catalog --geometry` (обязателен, без значения по умолчанию) |
-| Перерегистрация каналов события `nc75379261` | `results/events/20260618_75379261/real/channel_registration_qc/mapped_downleg_model_geometry.csv` | `settings.CHANNEL_MAPPING_CSV` (`prepare_event`); пишет его `scripts.safod.calibrate_channel_registration` |
-| Скоростные модели | `data/safod/velocity_models/<модель>/` | `src/safod/models/` (таблица ниже) |
+| Per-event DAS records (HDF5; for the 2026-10-03 experiment, `.pb` files) | `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD_events` | `scripts/safod/settings.py`: `SAFOD_EVENT_DATA_ROOT` and `EVENTS[<key>]["input_patterns"]` (keys `nc75336802`, `nc75379261` (default), `nc75336682`; selected by `SAFOD_EVENT_KEY`); own copies of the path in `scripts/safod/` `selection/check_catalog_coverage.py`, `selection/screen_events.py`, `experiments/oct03_2026/*`, `plot_das_geophone_two_physical_comparisons.py` |
+| SAFOD-deep continuous archive | 8 recording roots in `config/safod_deep/roots.json` (all under `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/`) | `scripts.safod_deep.build_event_catalog --roots-config` (required option); `scripts.safod_deep.scan_nano_manifest --root` (default root `2026-06-Nano`) |
+| Table of georeferenced cable channels | `/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx` (outside the project and outside git) | `settings.GEO_XLSX` (`prepare_event`); own copies of the path in 6 scripts (section 4); `geometry_xlsx` in `web_safod/config/*.json`; `build_event_catalog --geometry` (required, no default) |
+| Channel re-registration for event `nc75379261` | `results/events/20260618_75379261/real/channel_registration_qc/mapped_downleg_model_geometry.csv` | `settings.CHANNEL_MAPPING_CSV` (`prepare_event`); written by `scripts.safod.calibrate_channel_registration` |
+| Velocity models | `data/safod/velocity_models/<model>/` | `src/safod/models/` (table below) |
 
-Скоростные модели (пути внутри `data/safod/velocity_models/`; код читает их
-по относительным путям, поэтому запуск только из корня):
+Velocity models (paths inside `data/safod/velocity_models/`; the code reads
+them by relative paths, so run only from the root):
 
-| Модель | `raw/` | Что лежит ещё | Кто читает | Чем получено |
+| Model | `raw/` | What else is there | Who reads it | How it was produced |
 |---|---|---|---|---|
-| `zhang_thurber_bedrosian_2009/` | `MOD.head`, `inversion_grid.dat`, `Vp_model.dat`, `Vs_model.dat`, `Vpvs_model.dat` (переданы C. Thurber, см. `README.md` модели) | `processed/` (`.npz`, `.csv`), `qc/` (`.png`, `.txt`) | `src/safod/models/zhang2009.py` (`processed/zhang2009_safod_section_2d.npz`) | `scripts.safod.velocity_models.zhang2009.{parse_model, extract_safod_section, qc_registration}` |
-| `boness_zoback_2006/` | пуст | `processed/boness_zoback2006_fig3_4_vp_vs_digitized.csv`, `qc/boness_zoback2006_fig3_4_digitization_qc.png` | `src/safod/models/boness_zoback2006.py` | скрипта оцифровки в проекте нет — уточнить у автора |
-| `ellsworth_malin_2011/` | нет (без `raw/processed/qc`) | `fig3a_digitized.csv`, `README.md` | `src/safod/models/factory.py` (`DEFAULT_BILL_LOGS_CSV`) | `scripts.safod.velocity_models.digitize_ellsworth_malin_fig3a --image <рисунок>`; исходного рисунка в проекте нет |
+| `zhang_thurber_bedrosian_2009/` | `MOD.head`, `inversion_grid.dat`, `Vp_model.dat`, `Vs_model.dat`, `Vpvs_model.dat` (provided by C. Thurber, see the model's `README.md`) | `processed/` (`.npz`, `.csv`), `qc/` (`.png`, `.txt`) | `src/safod/models/zhang2009.py` (`processed/zhang2009_safod_section_2d.npz`) | `scripts.safod.velocity_models.zhang2009.{parse_model, extract_safod_section, qc_registration}` |
+| `boness_zoback_2006/` | empty | `processed/boness_zoback2006_fig3_4_vp_vs_digitized.csv`, `qc/boness_zoback2006_fig3_4_digitization_qc.png` | `src/safod/models/boness_zoback2006.py` | no digitization script in the project; ask the author |
+| `ellsworth_malin_2011/` | none (no `raw/processed/qc`) | `fig3a_digitized.csv`, `README.md` | `src/safod/models/factory.py` (`DEFAULT_BILL_LOGS_CSV`) | `scripts.safod.velocity_models.digitize_ellsworth_malin_fig3a --image <figure>`; the source figure is not in the project |
 
-Что не попадает в git (`.gitignore`, `web_safod/.gitignore`):
+What is not in git (`.gitignore`, `web_safod/.gitignore`):
 
-- `data/safod/velocity_models/` целиком: в клоне репозитория скоростных
-  моделей нет, их переносят отдельно;
-- `results/*`, кроме `results/README.md`, — включая CSV перерегистрации
-  каналов из таблицы выше;
-- везде `*.npz`, `*.npy`, `*.gif`, `*.mp4`;
+- all of `data/safod/velocity_models/`: a clone of the repository has no
+  velocity models; they are transferred separately;
+- `results/*`, except `results/README.md`, including the channel
+  re-registration CSV from the table above;
+- everywhere: `*.npz`, `*.npy`, `*.gif`, `*.mp4`;
 - `docs/history/`;
-- в `web_safod/`: `config/paths.local.json`, `cache/*` и `site/*` (кроме
-  их `README.md`), `reference/san_andreas_fault.geojson`.
+- in `web_safod/`: `config/paths.local.json`, `cache/*` and `site/*` (except
+  their `README.md`), `reference/san_andreas_fault.geojson`.
 
-`config/safod_deep/roots.json` в git есть.
+`config/safod_deep/roots.json` is in git.
 
-## 4. Внешние пути в коде
+## 4. External paths in the code
 
-Собрано командой (без `scripts/legacy/`; 64 совпадения):
+Collected with this command (without `scripts/legacy/`; 64 matches):
 
 ```bash
 grep -rnE '"/oak/|"/home/groups/|/oak/stanford|/home/groups/ettore88' \
@@ -147,74 +149,74 @@ grep -rnE '"/oak/|"/home/groups/|/oak/stanford|/home/groups/ettore88' \
   scripts src web_safod/config web_safod/scripts config | grep -v '^scripts/legacy'
 ```
 
-| Корень | Что | Где (файл:строка) |
+| Root | What | Where (file:line) |
 |---|---|---|
-| `/home/groups/ettore88/alina/packages/DAS-utilities` (и `build/`, `python/`, `python/DAS_db.py`) | DAS-utilities | `scripts/safod/settings.py:59`, `scripts/safod/prepare_event.py:23,24`, `scripts/safod/calibrate_channel_registration.py:42`, `scripts/safod/plot_das_geophone_two_physical_comparisons.py:34`, `scripts/safod/selection/check_catalog_coverage.py:19,20,37`, `scripts/safod_deep/plot_catalog_events.py:38`, `scripts/safod/experiments/oct03_2026/`: `compare_oct03_current_turnaround.py:54`, `compare_oct03_das_mh030_simple.py:58`, `diagnose_oct03_mh030_channels.py:75`, `find_current_mh030_das_channel.py:52`, `plot_oct03_das_geophone_like_scec.py:75`, `plot_oct03_m08_das_mh030_pb_v3.py:70`, `plot_oct03_m08_das_mh030_pb_v5.py:71` |
+| `/home/groups/ettore88/alina/packages/DAS-utilities` (and `build/`, `python/`, `python/DAS_db.py`) | DAS-utilities | `scripts/safod/settings.py:59`, `scripts/safod/prepare_event.py:23,24`, `scripts/safod/calibrate_channel_registration.py:42`, `scripts/safod/plot_das_geophone_two_physical_comparisons.py:34`, `scripts/safod/selection/check_catalog_coverage.py:19,20,37`, `scripts/safod_deep/plot_catalog_events.py:38`, `scripts/safod/experiments/oct03_2026/`: `compare_oct03_current_turnaround.py:54`, `compare_oct03_das_mh030_simple.py:58`, `diagnose_oct03_mh030_channels.py:75`, `find_current_mh030_das_channel.py:52`, `plot_oct03_das_geophone_like_scec.py:75`, `plot_oct03_m08_das_mh030_pb_v3.py:70`, `plot_oct03_m08_das_mh030_pb_v5.py:71` |
 | `/home/groups/ettore88/alina/packages/EikoHypoTomo` | EikoHypoTomo | `scripts/safod_deep/plot_catalog_events.py:84` |
-| `/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx` | таблица каналов | `scripts/safod/settings.py:32`, `scripts/safod/plot_das_geophone_two_physical_comparisons.py:69`, `scripts/safod/selection/find_catalog_events.py:18`, `scripts/safod/experiments/diagnose_geometry.py:19`, `scripts/safod/experiments/oct03_2026/plot_oct03_m08_das_mh030_pb_v3.py:108`, `scripts/safod/experiments/oct03_2026/plot_oct03_m08_das_mh030_pb_v5.py:109`, `scripts/safod_deep/plot_catalog_events.py:57`, `web_safod/config/explorer.json:5`, `web_safod/config/paths.example.json:6`, `web_safod/config/paths.local.json:6` |
-| `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD_events` | записи событий | `scripts/safod/settings.py:27`, `scripts/safod/plot_das_geophone_two_physical_comparisons.py:64`, `scripts/safod/selection/check_catalog_coverage.py:42`, `scripts/safod/selection/screen_events.py:32`, `scripts/safod/experiments/oct03_2026/`: `compare_oct03_current_turnaround.py:81,85`, `compare_oct03_das_mh030_simple.py:87,91`, `diagnose_oct03_mh030_channels.py:106,110`, `find_current_mh030_das_channel.py:71,75`, `plot_oct03_das_geophone_like_scec.py:107,111`, `plot_oct03_m08_das_mh030_pb_v3.py:98,102`, `plot_oct03_m08_das_mh030_pb_v5.py:99,103` |
-| `/oak/stanford/groups/ettore88/data/SAFOD` (`ActiveJune2026/**/*.h5`, `**/*.h5`) | расширенный поиск HDF5 | `scripts/safod/selection/check_catalog_coverage.py:43,44` |
-| `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep` | архив SAFOD-deep | `config/safod_deep/roots.json:5,11,17,23,29,35,41,47`, `scripts/safod_deep/scan_nano_manifest.py:136` |
-| `/home/groups/ettore88/alina/.envs/geo/bin/python`, `.../python3` | интерпретатор `geo` | `scripts/safod/settings.py:68`, `scripts/safod_deep/plot_catalog_events_array.sbatch:15` |
-| `/home/groups/ettore88/alina/.envs/fwi/bin/python` | интерпретатор `fwi` | `web_safod/scripts/build_site.sbatch:13` |
-| `/home/groups/ettore88/alina/classes/geophys245/Elastic_das_project` | корень проекта (`cd` в задании) | `scripts/safod_deep/plot_catalog_events_array.sbatch:14`, `web_safod/scripts/build_site.sbatch:12` |
-| `/home/groups/ettore88/alina/classes/geophys245/safod-event-explorer-pages` | checkout GitHub Pages (`pages_checkout`) | `web_safod/config/explorer.json:8` |
-| `/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv` | старая геометрия | `scripts/safod/run_forward.py:1680` (комментарий), `:1686` (ветка `deep_saf`; `source_mode` в коде зафиксирован как `"catalog_event"`) |
+| `/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx` | channel table | `scripts/safod/settings.py:32`, `scripts/safod/plot_das_geophone_two_physical_comparisons.py:69`, `scripts/safod/selection/find_catalog_events.py:18`, `scripts/safod/experiments/diagnose_geometry.py:19`, `scripts/safod/experiments/oct03_2026/plot_oct03_m08_das_mh030_pb_v3.py:108`, `scripts/safod/experiments/oct03_2026/plot_oct03_m08_das_mh030_pb_v5.py:109`, `scripts/safod_deep/plot_catalog_events.py:57`, `web_safod/config/explorer.json:5`, `web_safod/config/paths.example.json:6`, `web_safod/config/paths.local.json:6` |
+| `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD_events` | event records | `scripts/safod/settings.py:27`, `scripts/safod/plot_das_geophone_two_physical_comparisons.py:64`, `scripts/safod/selection/check_catalog_coverage.py:42`, `scripts/safod/selection/screen_events.py:32`, `scripts/safod/experiments/oct03_2026/`: `compare_oct03_current_turnaround.py:81,85`, `compare_oct03_das_mh030_simple.py:87,91`, `diagnose_oct03_mh030_channels.py:106,110`, `find_current_mh030_das_channel.py:71,75`, `plot_oct03_das_geophone_like_scec.py:107,111`, `plot_oct03_m08_das_mh030_pb_v3.py:98,102`, `plot_oct03_m08_das_mh030_pb_v5.py:99,103` |
+| `/oak/stanford/groups/ettore88/data/SAFOD` (`ActiveJune2026/**/*.h5`, `**/*.h5`) | extended HDF5 search | `scripts/safod/selection/check_catalog_coverage.py:43,44` |
+| `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep` | SAFOD-deep archive | `config/safod_deep/roots.json:5,11,17,23,29,35,41,47`, `scripts/safod_deep/scan_nano_manifest.py:136` |
+| `/home/groups/ettore88/alina/.envs/geo/bin/python`, `.../python3` | `geo` interpreter | `scripts/safod/settings.py:68`, `scripts/safod_deep/plot_catalog_events_array.sbatch:15` |
+| `/home/groups/ettore88/alina/.envs/fwi/bin/python` | `fwi` interpreter | `web_safod/scripts/build_site.sbatch:13` |
+| `/home/groups/ettore88/alina/classes/geophys245/Elastic_das_project` | project root (`cd` in the job) | `scripts/safod_deep/plot_catalog_events_array.sbatch:14`, `web_safod/scripts/build_site.sbatch:12` |
+| `/home/groups/ettore88/alina/classes/geophys245/safod-event-explorer-pages` | GitHub Pages checkout (`pages_checkout`) | `web_safod/config/explorer.json:8` |
+| `/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv` | old geometry | `scripts/safod/run_forward.py:1680` (comment), `:1686` (`deep_saf` branch; `source_mode` is fixed in the code as `"catalog_event"`) |
 
-Вне этого поиска: код ячеек `notebooks/NC75379261_DAS_geophone.ipynb`
-содержит пути DAS-utilities и `SAFOD_events`.
+Outside this search: the cell code of `notebooks/NC75379261_DAS_geophone.ipynb`
+contains the DAS-utilities and `SAFOD_events` paths.
 
-Константы путей в `scripts/safod/settings.py`, которые другие модули не
-импортируют: `DAS_UTILITIES_BUILD` (:62), `DESAMPLE_DAS_PY` (:65) и
-`GEO_PYTHON` (:67) не используются нигде; `DAS_UTILITIES_ROOT` (:58) и
-`DAS_UTILITIES_PYTHON` (:63) нужны только внутри `settings.py`, чтобы
-собрать `DAS_DB_PY`; `SAFOD_EVENT_DATA_ROOT` (:26) — только для `EVENTS`.
-Из путей `settings.py` другие модули импортируют только `DAS_DB_PY`
-(`prepare_event`, `selection.screen_events`) и `GEO_XLSX` (`prepare_event`).
-Собрать пути в одном конфиге — возможный следующий шаг.
+Path constants in `scripts/safod/settings.py` that other modules do not
+import: `DAS_UTILITIES_BUILD` (:62), `DESAMPLE_DAS_PY` (:65) and
+`GEO_PYTHON` (:67) are not used anywhere; `DAS_UTILITIES_ROOT` (:58) and
+`DAS_UTILITIES_PYTHON` (:63) are needed only inside `settings.py`, to
+build `DAS_DB_PY`; `SAFOD_EVENT_DATA_ROOT` (:26) only for `EVENTS`.
+Of the `settings.py` paths, other modules import only `DAS_DB_PY`
+(`prepare_event`, `selection.screen_events`) and `GEO_XLSX` (`prepare_event`).
+Collecting the paths in one config is a possible next step.
 
-## 5. Как запускать
+## 5. How to run
 
-- Из корня проекта, модулем: `python -m scripts.<...>`. Пути к `results/` и
-  `data/` в коде относительные. Кроме того, вне корня пакет `scripts` в `fwi`
-  находится в devito: из `/tmp`
+- From the project root, as a module: `python -m scripts.<...>`. Paths to
+  `results/` and `data/` in the code are relative. Also, outside the root the
+  `scripts` package in `fwi` resolves to devito: from `/tmp`
   `/home/groups/ettore88/alina/.envs/fwi/bin/python -c "import importlib.util; print(importlib.util.find_spec('scripts'))"`
-  показывает `/home/groups/ettore88/alina/packages/devito/scripts`.
-- Только на вычислительном узле: `sh_dev` (по умолчанию раздел `dev`, 1 ядро,
-  4 ГБ, 1 ч; опции `-c`, `-m`, `-t`) или `sbatch` с явным `--time`. Разделы
-  и лимиты — `sh_part`. На логин-узле — только редактирование и просмотр.
-- Для коротких проверок ограничить потоки:
+  shows `/home/groups/ettore88/alina/packages/devito/scripts`.
+- Only on a compute node: `sh_dev` (default partition `dev`, 1 core,
+  4 GB, 1 h; options `-c`, `-m`, `-t`) or `sbatch` with an explicit `--time`.
+  Partitions and limits: `sh_part`. On a login node, only editing and viewing.
+- For short checks, limit threads:
   `export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1`.
-  В `scripts/safod_deep/plot_catalog_events_array.sbatch` `OMP_NUM_THREADS`
-  и `NUMBA_NUM_THREADS` равны `$SLURM_CPUS_PER_TASK`.
-- Импорт `scripts/safod/settings.py` не обращается к Oak. Он выбирает событие
-  `SAFOD_EVENT_KEY` (по умолчанию `nc75379261`); неизвестный ключ вызывает
-  `ValueError`. `prepare_event.main()` вызывает `get_selected_files()` до
-  запроса каталога и чтения данных: отсутствие HDF5 по-прежнему вызывает
-  `FileNotFoundError`. Независимые тесты модели могут работать без `/oak`.
-- `sbatch` — только из корня: `#SBATCH --output/--error` в файлах проекта
-  относительные, Slurm отсчитывает их от каталога отправки и каталог для
-  логов не создаёт:
+  In `scripts/safod_deep/plot_catalog_events_array.sbatch` `OMP_NUM_THREADS`
+  and `NUMBA_NUM_THREADS` are set to `$SLURM_CPUS_PER_TASK`.
+- Importing `scripts/safod/settings.py` does not access Oak. It selects the
+  event `SAFOD_EVENT_KEY` (default `nc75379261`); an unknown key raises
+  `ValueError`. `prepare_event.main()` calls `get_selected_files()` before
+  querying the catalog and reading data: missing HDF5 still raises
+  `FileNotFoundError`. Independent model tests can run without `/oak`.
+- `sbatch` only from the root: `#SBATCH --output/--error` in the project files
+  are relative, Slurm resolves them from the submission directory and does not
+  create the log directory:
 
   ```bash
   cd /home/groups/ettore88/alina/classes/geophys245/Elastic_das_project
-  mkdir -p results/<область>/logs
-  sbatch <путь/к/файлу>.sbatch
+  mkdir -p results/<area>/logs
+  sbatch <path/to/file>.sbatch
   ```
 
-  | Файл | Окружение | Логи |
+  | File | Environment | Logs |
   |---|---|---|
   | `scripts/safod_deep/plot_catalog_events_array.sbatch` | `geo` | `results/safod_deep/logs/` |
   | `web_safod/scripts/build_site.sbatch` | `fwi` | `web_safod/cache/` |
 
-  Оба файла делают `cd` в абсолютный корень проекта (раздел 4). Куда класть
-  логи новых заданий — [results/README.md](../results/README.md); когда и с
-  какими параметрами запускать — [safod/workflow.md](safod/workflow.md) и
+  Both files `cd` into the absolute project root (section 4). Where to put
+  logs of new jobs: [results/README.md](../results/README.md); when and with
+  which parameters to run: [safod/workflow.md](safod/workflow.md) and
   [web_safod/README.md](../web_safod/README.md).
 
-## 6. Тесты
+## 6. Tests
 
-Из корня, в `fwi`, на вычислительном узле:
+From the root, in `fwi`, on a compute node:
 
 ```bash
 cd /home/groups/ettore88/alina/classes/geophys245/Elastic_das_project
@@ -223,52 +225,53 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 ```
 
 [`pytest.ini`](../pytest.ini): `testpaths = tests web_safod/tests`,
-`pythonpath = .`, в `norecursedirs` — `results`, `data`, `notebooks`,
-`web_safod/site`, `web_safod/cache`. Весь набор занимает несколько секунд
-(замер 2026-10-16).
+`pythonpath = .`, `norecursedirs` includes `results`, `data`, `notebooks`,
+`web_safod/site`, `web_safod/cache`. The full suite takes a few seconds
+(measured 2026-10-16).
 
-| Файл | Что проверяет | Условия |
+| File | What it checks | Conditions |
 |---|---|---|
-| `tests/test_project_layout.py` | текст проекта: нет старых имён модулей и путей; цели `python -m` в `.md`, `.sbatch`, `.sh`, `.ipynb` находятся; относительные ссылки в `.md` не битые и не выходят из проекта | код проекта не исполняет |
-| `tests/test_safod_smooth_prior_explicit_bounds.py` | явные границы сетки в `src.safod.models.smooth_prior.build_smooth_prior_model` | синтетическая геометрия, `/oak` не нужен |
-| `tests/test_safod_settings.py` | импорт настроек без поиска данных; строгая проверка файлов при подготовке события | `/oak` не нужен |
-| `web_safod/tests/test_web_safod.py` | builder `web_safod` ([web_safod/README.md](../web_safod/README.md)) | — |
+| `tests/test_project_layout.py` | project text: no old module names and paths; `python -m` targets in `.md`, `.sbatch`, `.sh`, `.ipynb` resolve; relative links in `.md` are not broken and do not leave the project | does not execute project code |
+| `tests/test_safod_smooth_prior_explicit_bounds.py` | explicit grid bounds in `src.safod.models.smooth_prior.build_smooth_prior_model` | synthetic geometry, `/oak` not needed |
+| `tests/test_safod_settings.py` | importing settings without searching for data; strict file check when preparing an event | `/oak` not needed |
+| `web_safod/tests/test_web_safod.py` | the `web_safod` builder ([web_safod/README.md](../web_safod/README.md)) | — |
 
-Голый `pytest` работает, пока подхватывается `pytest.ini` (запуск из корня или
-с путями внутри проекта). Если ini не используется (например, `-c` с другим
-файлом), корня нет в `sys.path`, `scripts` находится в devito и сбор падает с
-`No module named 'scripts.safod'`. Поэтому — `python -m pytest` из корня.
+Bare `pytest` works as long as `pytest.ini` is picked up (run from the root or
+with paths inside the project). If the ini is not used (for example, `-c` with
+another file), the root is not in `sys.path`, `scripts` resolves to devito and
+collection fails with `No module named 'scripts.safod'`. Hence
+`python -m pytest` from the root.
 
-Тесты `web_safod` отдельно:
+`web_safod` tests separately:
 
 ```bash
 /home/groups/ettore88/alina/.envs/fwi/bin/python -m unittest web_safod.tests.test_web_safod
 node --test web_safod/tests/test_app.cjs
 ```
 
-Node.js в `fwi` нет. Проверить, есть ли `node` в оболочке:
-`command -v node && node --version` (в оболочке агента 2026-10-16 находился
-`/home/groups/ettore88/alina/.envs/cursor-node/bin/node`, v20.20.2; в `geo`
-есть `bin/node`, v22.6.0). Модули Sherlock: `ml spider nodejs` (на
-2026-10-16 — 20.20.0, 24.13.0, 25.3.0, загрузка `ml devel nodejs/20.20.0`).
-Если функции `ml` в оболочке нет, — `bash -lc 'ml spider nodejs'`.
-Проверки интерфейса описаны в [web_safod/README.md](../web_safod/README.md).
+There is no Node.js in `fwi`. To check whether `node` is in the shell:
+`command -v node && node --version` (in the agent shell on 2026-10-16 it found
+`/home/groups/ettore88/alina/.envs/cursor-node/bin/node`, v20.20.2; `geo`
+has `bin/node`, v22.6.0). Sherlock modules: `ml spider nodejs` (as of
+2026-10-16: 20.20.0, 24.13.0, 25.3.0; load with `ml devel nodejs/20.20.0`).
+If the `ml` function is not available in the shell, use `bash -lc 'ml spider nodejs'`.
+Interface checks are described in [web_safod/README.md](../web_safod/README.md).
 
 ## 7. `requirements.txt`
 
-[`requirements.txt`](../requirements.txt) — минимальный список для `fwi`, не
-lock-файл и не описание `geo`:
+[`requirements.txt`](../requirements.txt) is a minimal list for `fwi`, not a
+lock file and not a description of `geo`:
 
-- `numpy`, `scipy`, `matplotlib`, `numba` (с нижними границами версий) —
-  решатели и графика; `jupyter`, `ipykernel` — ноутбуки;
+- `numpy`, `scipy`, `matplotlib`, `numba` (with lower version bounds):
+  solvers and graphics; `jupyter`, `ipykernel`: notebooks;
 - `pandas`, `h5py`, `obspy`, `pyproj`, `python-dateutil`, `openpyxl`,
-  `Pillow`, `pytest` — без версий: данные SAFOD (HDF5, FDSN, координаты,
-  Excel через `pandas.read_excel`), каталоги, `web_safod`, тесты. Версии в
-  `fwi` на 2026-10-16 записаны в комментарии файла;
-- DAS-utilities и EikoHypoTomo с PyPI не ставятся (раздел 2); `pykonal` для
-  EikoHypoTomo есть только в `geo`.
+  `Pillow`, `pytest`, without versions: SAFOD data (HDF5, FDSN, coordinates,
+  Excel via `pandas.read_excel`), catalogs, `web_safod`, tests. The versions in
+  `fwi` as of 2026-10-16 are recorded in a comment in the file;
+- DAS-utilities and EikoHypoTomo are not installed from PyPI (section 2);
+  `pykonal` for EikoHypoTomo is only in `geo`.
 
-Расхождения с `fwi`: метапакета `jupyter` в `fwi` нет (есть `jupyterlab`,
-`notebook`, `ipykernel`); devito в `fwi` есть, но в файле не указан и кодом
-проекта не импортируется. `web_safod/requirements.txt` — подмножество для
-сайта (`pandas`, `openpyxl`, `Pillow`).
+Differences from `fwi`: the `jupyter` metapackage is not in `fwi` (it has
+`jupyterlab`, `notebook`, `ipykernel`); devito is in `fwi` but is not listed
+in the file and is not imported by project code. `web_safod/requirements.txt`
+is a subset for the site (`pandas`, `openpyxl`, `Pillow`).
