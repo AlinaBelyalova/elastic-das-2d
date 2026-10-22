@@ -1,7 +1,7 @@
 {
   "catalog": "results/safod_deep/catalog/catalog_recorded.csv",
-  "event_qc_dir": "results/safod_deep/event_qc",
-  "event_metadata_dir": "results/safod_deep/event_qc/metadata",
+  "event_qc_dir": "results/safod_deep/event_qc_3d_eikonal",
+  "event_metadata_dir": "results/safod_deep/event_qc_3d_eikonal/metadata",
   "geometry_xlsx": "/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx",
   "site_dir": "web_safod/site",
   "fault_geojson": "web_safod/reference/san_andreas_fault.geojson",

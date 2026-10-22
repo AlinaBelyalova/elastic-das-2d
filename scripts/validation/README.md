@@ -55,6 +55,12 @@ Notes on the criteria: `PASSED` and `FAILED` are strings printed by the
 script; "error" means an exception (`RuntimeError` etc.) and a non-zero exit
 code.
 
+## SAFOD travel times
+
+`scripts.validation.safod.travel_times_3d` checks the installed EikoHypoTomo
+wrapper against homogeneous analytical P/S times. Commands, criteria and
+real-model follow-up: [docs/safod/travel_times.md](../../docs/safod/travel_times.md).
+
 ## Self-tests of `src` modules
 
 The modules `src.elastic.source`, `src.elastic.source_spreading`,

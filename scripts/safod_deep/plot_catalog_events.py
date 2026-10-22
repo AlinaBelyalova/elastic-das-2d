@@ -14,7 +14,7 @@ Future interrogator changes do not require source-code changes: rerun
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import datetime as dt
 import hashlib
 import html
@@ -48,10 +48,13 @@ import DASutils  # noqa: E402
 
 from src.safod.models import build_initial_model  # noqa: E402
 from src.safod.models.zhang2009 import DEFAULT_ZHANG_SECTION  # noqa: E402
+from src.safod.travel_times import (  # noqa: E402
+    Zhang3D, add_travel_time_arguments, prediction_options, require_backend,
+)
 
 DEFAULT_CATALOG = Path("results/safod_deep/catalog/catalog_recorded.csv")
 DEFAULT_MANIFEST = Path("results/safod_deep/catalog/recording_manifest.csv")
-DEFAULT_OUTPUT_DIR = Path("results/safod_deep/event_qc")
+DEFAULT_OUTPUT_DIR = Path("results/safod_deep/event_qc_3d_eikonal")
 DEFAULT_GEOMETRY_DIR = Path("results/safod_deep/geometry")
 GEO_XLSX = Path(
     "/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx"
@@ -76,10 +79,9 @@ DEFAULT_PCLIP = 96.0
 DEFAULT_DPI = 180
 MAX_DISPLAY_FS_HZ = 500.0
 
-# P/S first-arrival overlays.  The preferred path uses Ettore Biondi's
-# EikoHypoTomo wrapper (which calls pykonal internally) on the actual SAFOD
-# velocity models.  The straight-ray calculation is retained only as a robust
-# fallback for catalogue events outside the available eikonal model domains.
+# The default is native Zhang 2009 3-D eikonal through EikoHypoTomo.
+# The following 2-D hybrid and straight-ray options are explicit legacy modes;
+# they are never automatic fallbacks from the 3-D mode.
 EIKO_HYPO_TOMO_ROOT = Path(
     "/home/groups/ettore88/alina/packages/EikoHypoTomo"
 )
@@ -187,6 +189,8 @@ class PhaseGuideContext:
     geometry: PhaseGuideGeometry
     eikonal_models: tuple[EikonalPhaseModel, ...]
     eikonal_error: str | None = None
+    zhang_3d: Zhang3D | None = None
+    failures: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -203,6 +207,8 @@ class PhaseTravelTimeGuide:
     grid_dz_m: float = float("nan")
     fallback_vp_km_s: float = float("nan")
     fallback_vs_km_s: float = float("nan")
+    details: dict = field(default_factory=dict)
+    source_y_m: float = float("nan")
 
     @property
     def p_min_s(self) -> float:
@@ -495,6 +501,12 @@ def prepare_phase_guide_context(
     args: argparse.Namespace,
 ) -> PhaseGuideContext:
     geometry = build_phase_guide_geometry(reference)
+    if args.phase_guide_mode == "3d":
+        require_backend(args.eiko_root, 3)
+        return PhaseGuideContext(
+            geometry=geometry, eikonal_models=(),
+            zhang_3d=Zhang3D(args.phase_native_grid),
+        )
     models: list[EikonalPhaseModel] = []
     errors: list[str] = []
 
@@ -821,6 +833,44 @@ def choose_phase_travel_time_guide(
     if args.no_travel_time_guides or args.phase_guide_mode == "none":
         return None
 
+    if args.phase_guide_mode == "3d":
+        event_id = str(event_row["event_id"])
+        try:
+            borehole = reference["borehole"].sort_values("fibre_distance_m")
+            borehole = borehole.dropna(subset=["fibre_distance_m", "Lat_WGS84", "Lon_WGS84", "TVD_m"])
+            fibre = np.asarray(fibre_distance_m, dtype=float)
+            reference_fibre = borehole["fibre_distance_m"].to_numpy(float)
+            if (np.any(np.diff(reference_fibre) <= 0)
+                    or fibre.min() < reference_fibre[0] or fibre.max() > reference_fibre[-1]):
+                raise ValueError("Phase-guide fibre coordinates exceed the reference geometry.")
+            lat, lon, tvd = (
+                np.interp(fibre, reference_fibre, borehole[name].to_numpy(float))
+                for name in ("Lat_WGS84", "Lon_WGS84", "TVD_m")
+            )
+            p, s, details = context.zhang_3d.predict(
+                source_lat=float(event_row["latitude"]),
+                source_lon=float(event_row["longitude"]),
+                source_depth_km=float(event_row["depth_km"]),
+                receiver_lat=lat, receiver_lon=lon, receiver_tvd_m=tvd,
+                surface_elevation_m=SAFOD_SURFACE_ELEVATION_M,
+                **prediction_options(args),
+            )
+            source_x, source_y, source_z = details["source_xyz_m"]
+            return PhaseTravelTimeGuide(
+                fibre_distance_m=fibre, p_time_s=p, s_time_s=s,
+                method=details["method"], model_name=details["model_name"],
+                model_label="Zhang 2009 3-D", source_x_m=source_x, source_z_m=source_z,
+                grid_dx_m=args.phase_3d_spacing_m, grid_dz_m=args.phase_3d_spacing_m,
+                details=details,
+                source_y_m=source_y,
+            )
+        except Exception as exc:
+            # Keep the observed DAS plot, but never replace a failed 3-D
+            # prediction by a different physical model.
+            context.failures[event_id] = f"{type(exc).__name__}: {exc}"
+            print(f"P/S prediction unavailable for {event_id}: {context.failures[event_id]}")
+            return None
+
     if args.phase_guide_mode in {"auto", "eikonal"}:
         guide = predict_eikonal_phase_travel_times(
             event_row=event_row,
@@ -849,6 +899,8 @@ def resample_phase_guide(
     if guide is None:
         return None
     fibre = np.asarray(fibre_distance_m, dtype=np.float64)
+    if fibre.min() < guide.fibre_distance_m[0] or fibre.max() > guide.fibre_distance_m[-1]:
+        raise ValueError("Registered fibre coordinates exceed the predicted reference geometry.")
     return PhaseTravelTimeGuide(
         fibre_distance_m=fibre,
         p_time_s=np.interp(fibre, guide.fibre_distance_m, guide.p_time_s),
@@ -862,6 +914,8 @@ def resample_phase_guide(
         grid_dz_m=guide.grid_dz_m,
         fallback_vp_km_s=guide.fallback_vp_km_s,
         fallback_vs_km_s=guide.fallback_vs_km_s,
+        details=guide.details,
+        source_y_m=guide.source_y_m,
     )
 
 
@@ -2519,6 +2573,8 @@ def plot_event(
     cb.set_label("strain rate [nm/m/s]")
 
     # Base plot is intentionally clean: no P/S curves.
+    if travel_time_guide is None:
+        annotation.set_text(base_annotation + "\nP/S prediction unavailable or disabled")
     ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
     fig.tight_layout()
     fig.savefig(output_path, dpi=int(dpi), bbox_inches="tight")
@@ -2578,6 +2634,7 @@ def process_event(
     overwrite: bool,
     dpi: int,
     phase_guide_full: PhaseTravelTimeGuide | None,
+    phase_guide_error: str | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     origin = pd.Timestamp(event_row["origin_time_utc"])
@@ -2607,6 +2664,22 @@ def process_event(
         and not overwrite
     ):
         record = json.loads(metadata_path.read_text())
+        previous = record.get("travel_time_guide") or {}
+        requested = phase_guide_full
+        previous_identity = (
+            previous.get("method"), previous.get("model_name"),
+            (previous.get("details") or {}).get("cache_key"),
+        )
+        requested_identity = (
+            (requested.method, requested.model_name, requested.details.get("cache_key"))
+            if requested is not None else (None, None, None)
+        )
+        if (previous_identity != requested_identity
+                or record.get("travel_time_guide_error") != phase_guide_error):
+            raise RuntimeError(
+                "Existing plot has different P/S provenance. Use a new --output-dir "
+                "or explicitly request --overwrite."
+            )
         record["status"] = "exists"
         record["elapsed_s"] = 0.0
         return record
@@ -2743,6 +2816,12 @@ def process_event(
                 "model_label": travel_time_guide.model_label,
                 "source_x_m": float(travel_time_guide.source_x_m),
                 "source_z_m": float(travel_time_guide.source_z_m),
+                "source_y_m": finite_float(travel_time_guide.source_y_m),
+                "source_coordinate_frame": (
+                    "Zhang native XYZ; metres; z is MSL-referenced depth"
+                    if travel_time_guide.model_name == "zhang2009_native_3d"
+                    else "SAFOD profile XZ; metres; z is depth below local ground"
+                ),
                 "grid_dx_m": finite_float(travel_time_guide.grid_dx_m),
                 "grid_dz_m": finite_float(travel_time_guide.grid_dz_m),
                 "fallback_vp_km_s": finite_float(
@@ -2755,6 +2834,7 @@ def process_event(
                 "p_max_s": travel_time_guide.p_max_s,
                 "s_min_s": travel_time_guide.s_min_s,
                 "s_max_s": travel_time_guide.s_max_s,
+                "details": travel_time_guide.details,
             }
         ),
         "files": files,
@@ -2769,6 +2849,7 @@ def process_event(
             else None
         ),
         "arrivals_available": bool(travel_time_guide is not None),
+        "travel_time_guide_error": phase_guide_error,
         "elapsed_s": float(time.perf_counter() - started),
     }
 
@@ -3773,11 +3854,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--phase-guide-mode",
-        choices=["auto", "eikonal", "straight", "none"],
-        default="auto",
+        choices=["3d", "auto", "eikonal", "straight", "none"],
+        default="3d",
         help=(
-            "P/S prediction mode. auto: preferred hybrid eikonal, then Zhang "
-            "regional eikonal, then straight-ray fallback. Default: auto."
+            "Default 3d: native Zhang 2009 with EikoHypoTomo, no fallback. "
+            "auto/eikonal/straight retain explicit legacy modes."
         ),
     )
     parser.add_argument(
@@ -3853,6 +3934,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-index", type=int, default=None)
     parser.add_argument("--build-index-only", action="store_true")
 
+    add_travel_time_arguments(parser)
     return parser.parse_args()
 
 
@@ -4031,6 +4113,7 @@ def main() -> None:
                 overwrite=args.overwrite,
                 dpi=args.dpi,
                 phase_guide_full=preview_guide,
+                phase_guide_error=phase_context.failures.get(str(event["event_id"])),
             )
             print(
                 f"status={result['status']}, "
@@ -4068,6 +4151,7 @@ def main() -> None:
     print("-------------")
     print(f"successful/existing : {len(statuses) - n_errors}")
     print(f"errors              : {n_errors}")
+    print(f"P/S unavailable     : {sum(bool(x.get('travel_time_guide_error')) for x in statuses)}")
     print(f"elapsed             : {elapsed / 60.0:.1f} min")
     print(f"status CSV          : {status_path}")
 

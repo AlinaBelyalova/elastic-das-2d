@@ -506,7 +506,8 @@
   }
 
   function eventMarkerTooltipHtml(event) {
-    return `${escapeHtml(event.event_id)} · ${escapeHtml(fmtMagnitude(event))} · ${fmtNumber(event.depth_km, 1, " km")}`;
+    return `${escapeHtml(event.event_id)} · ${escapeHtml(fmtMagnitude(event))} · ${fmtNumber(event.depth_km, 1, " km")}<br>` +
+      escapeHtml(fmtTime(event.origin_time_utc));
   }
 
   function bindEventMarkerInfo(marker, event) {
@@ -523,6 +524,7 @@
 
   function focalMarkerTooltipHtml(event, mechanism) {
     return `${escapeHtml(event.event_id)} · ${escapeHtml(fmtMagnitude(event))}<br>` +
+      `${escapeHtml(fmtTime(event.origin_time_utc))}<br>` +
       `NP1 ${escapeHtml(fmtNodalPlane(mechanism.np1))}`;
   }
 

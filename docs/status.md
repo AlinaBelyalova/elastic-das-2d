@@ -50,6 +50,15 @@ one at a time, with an adjoint operator check after each addition.
 
 ## Open questions
 
+Native Zhang 2009 3-D arrival predictions are implemented for the web
+gallery and real-data comparisons; synthetic panels use their matching
+2-D model. Independent local homogeneous-medium QC passed with the public
+EikoHypoTomo wrapper. Installed-backend compatibility, native-model
+registration, real-event grid/padding convergence, and regenerated website
+products still require verification on Sherlock. See
+[travel-time validation](safod/travel_times.md). No real-data or deployment
+success is implied by the local numerical QC.
+
 1. **Event 2026-10-03: v3 or v5.** For nc75443276 there are two versions of
    the DAS vs MH030 comparison: `plot_oct03_m08_das_mh030_pb_v3.py` (zero phase,
    `sosfiltfilt`; writes `compare/das_mh030_comparison_v3_zerophase`) and

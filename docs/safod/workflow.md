@@ -133,6 +133,12 @@ is solved separately: `plot_catalog_events --prepare-geometry` (part B).
 
 ### run_forward and compare_event
 
+Predicted P/S now use native Zhang 2009 3-D eikonal times for real data,
+and the saved forward model's 2-D eikonal times for synthetics. The new
+`--arrivals-only` mode computes curves without filtering or rerunning the
+elastic solver. Geometry, numerical checks, commands and output conventions
+are documented in [travel_times.md](travel_times.md).
+
 - `--initial-model` has different defaults: `run_forward` uses
   `bill_logs`, `compare_event` uses `hybrid_zhang2009_boness2006_bill_logs`
   (the default angle of both is `DEFAULT_THETA_DEG = 35.0`). `compare_event`
@@ -185,9 +191,9 @@ relative to `results/safod_deep/`.
 | 1. Inventory of Nano recordings | `scan_nano_manifest.py` | fwi | `--root`, default `/oak/stanford/groups/ettore88/data/SAFOD/SAFOD-deep/2026-06-Nano`; the default label, priority and note repeat the `2026-06_nano` entry in `roots.json` | `catalog/recording_manifest_nano.csv` | `$FWI -m scripts.safod_deep.scan_nano_manifest` |
 | 2. Event catalog and coverage | `build_event_catalog.py` | fwi | `config/safod_deep/roots.json`, `GEO_XLSX`, NCEDC | `catalog/`: `recording_manifest.csv`, `ncedc_events_raw.csv`, `catalog_all.csv`, `catalog_recorded.csv`, `catalog_2d_direct_source_candidates.csv`, `event_windows_for_plotting.csv`, `CATALOG_NOTES.md`, PNG | see below |
 | 3. Geometry registration per configuration | `plot_catalog_events.py --prepare-geometry` | geo | `catalog/catalog_recorded.csv`, `catalog/recording_manifest.csv`, `GEO_XLSX` | `geometry/acquisition_registration.json`, `geometry/acquisition_registration_qc.png` | `$GEO -m scripts.safod_deep.plot_catalog_events --prepare-geometry` |
-| 4. Event QC plots | `plot_catalog_events_array.sbatch` | geo | the same plus the stage 3 registry | `event_qc/`: PNG, `metadata/*.json`, `status_shard_<i>_of_008.csv`; Slurm logs in `logs/` | `mkdir -p results/safod_deep/logs && sbatch scripts/safod_deep/plot_catalog_events_array.sbatch` |
-| 5. Local HTML gallery | `plot_catalog_events.py --build-index-only` | geo | `event_qc/` | `event_qc/index.html`, `event_qc/gallery_manifest.csv` | `$GEO -m scripts.safod_deep.plot_catalog_events --build-index-only` |
-| 6. Web viewer | `web_safod/` | fwi | `catalog/catalog_recorded.csv`, `event_qc/`, `event_qc/metadata/` (paths in `web_safod/config/explorer.json`) | `web_safod/site/` | [web_safod/README.md](../../web_safod/README.md) |
+| 4. Event QC plots | `plot_catalog_events_array.sbatch` | geo | the same plus the stage 3 registry | `event_qc_3d_eikonal/`: PNG, `metadata/*.json`, `status_shard_<i>_of_008.csv`; Slurm logs in `logs/` | `mkdir -p results/safod_deep/logs && sbatch scripts/safod_deep/plot_catalog_events_array.sbatch` |
+| 5. Local HTML gallery | `plot_catalog_events.py --build-index-only` | geo | `event_qc_3d_eikonal/` | `event_qc_3d_eikonal/index.html`, `event_qc_3d_eikonal/gallery_manifest.csv` | `$GEO -m scripts.safod_deep.plot_catalog_events --build-index-only` |
+| 6. Web viewer | `web_safod/` | fwi | `catalog/catalog_recorded.csv`, `event_qc_3d_eikonal/`, `event_qc_3d_eikonal/metadata/` (paths in `web_safod/config/explorer.json`) | `web_safod/site/` | [web_safod/README.md](../../web_safod/README.md) |
 
 A new recording folder on Oak is added to `config/safod_deep/roots.json`
 (`label`, `path`, `priority`, `notes`).
@@ -232,13 +238,15 @@ $FWI -m scripts.safod_deep.build_event_catalog \
 - Band, windows, P/S guides and event selection are set by flags
   (`--fmin`, `--fmax`, `--phase-guide-mode`, `--phase-model`, `--event-id`,
   `--geometry-class`, `--limit`, `--output-dir` etc., see `--help`).
-  By default the P/S guides are computed in the model
-  `hybrid_zhang2009_boness2006_bill_logs_smooth` (`--phase-model`) with
-  EikoHypoTomo (`/home/groups/ettore88/alina/packages/EikoHypoTomo`).
+  The default is `--phase-guide-mode 3d`: native Zhang 2009 through
+  EikoHypoTomo, with no automatic fallback. The previous hybrid model
+  remains available in explicitly selected legacy modes. See
+  [travel_times.md](travel_times.md) for pilot checks and regeneration.
 - For the folders `event_qc_1_20Hz/`, `event_qc_3_15Hz/`, `event_qc_5_30Hz/`
   and `event_qc_adaptive/` the commands were not saved; the processing
   parameters of each event are recorded in their `metadata/*.json`.
-  `web_safod` reads only `event_qc/` by default.
+  `web_safod` now reads `event_qc_3d_eikonal/` by default; retain the older
+  galleries as historical products.
 - The code that created `geometry/nano_registration.json`,
   `geometry/nano_registration_qc.png` and `geometry/nano_mapping.csv` was not
   found in the current project.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -21,12 +22,17 @@ from scripts.safod.settings import (
     FILTER_TAPER_FRAC,
     GEOMETRY_CSV,
     REAL_EVENT_PACKAGE,
+    SAFOD_SURFACE_ELEVATION_M,
     comparison_dir_for_theta,
     forward_package_for_theta,
     forward_run_tag,
 )
 from src.common.signal_processing import bandpass_traces, median_welch_psd
 from src.safod.models import AVAILABLE_INITIAL_MODELS
+from src.safod.travel_times import (
+    Zhang3D, add_travel_time_arguments, prediction_options,
+    receivers_from_channels, solve_eikonal,
+)
 
 
 # =============================================================================
@@ -520,6 +526,7 @@ def add_arrival_overlays(
     time_shift_s: float = 0.0,
     light: bool = False,
     include_labels: bool = True,
+    model_label: str = "2-D eikonal (synthetic model)",
 ) -> None:
     colour = (
         PREDICTED_ARRIVAL_COLOR_LIGHT
@@ -543,7 +550,7 @@ def add_arrival_overlays(
         color=colour,
         linestyle=":",
         linewidth=PREDICTED_P_LINEWIDTH,
-        label="Predicted P" if include_labels else None,
+        label=f"Predicted P: {model_label}" if include_labels else None,
         zorder=20,
     )
 
@@ -553,7 +560,7 @@ def add_arrival_overlays(
         color=colour,
         linestyle="--",
         linewidth=PREDICTED_S_LINEWIDTH,
-        label="Predicted S" if include_labels else None,
+        label=f"Predicted S: {model_label}" if include_labels else None,
         zorder=20,
     )
 
@@ -563,12 +570,9 @@ def plot_real_with_arrivals(
     real_signed_normalized,
     real_time_s,
     real_channels,
-    arrival_channels,
-    p_arrivals_s,
-    s_arrivals_s,
     event_id,
-    initial_model,
     out_path,
+    real_arrivals,
 ):
     fig, ax = plt.subplots(figsize=(11, 8))
 
@@ -597,9 +601,7 @@ def plot_real_with_arrivals(
 
     add_arrival_overlays(
         ax=ax,
-        arrival_channels=arrival_channels,
-        p_arrivals_s=p_arrivals_s,
-        s_arrivals_s=s_arrivals_s,
+        **real_arrivals,
         include_labels=True,
     )
 
@@ -611,7 +613,7 @@ def plot_real_with_arrivals(
 
     ax.set_title(
         f"{event_id} real DAS with predicted arrivals\n"
-        f"initial model: {initial_model}"
+        "Zhang 2009 3-D eikonal"
     )
     ax.set_xlabel("Physical reference channel")
     ax.set_ylabel("Time from catalog origin [s]")
@@ -643,6 +645,7 @@ def plot_signed_side_by_side(
     synthetic_display_shift_s,
     initial_model,
     out_path,
+    real_arrivals,
 ):
     fig, axes = plt.subplots(
         1,
@@ -678,9 +681,7 @@ def plot_signed_side_by_side(
 
     add_arrival_overlays(
         ax=ax_real,
-        arrival_channels=arrival_channels,
-        p_arrivals_s=p_arrivals_s,
-        s_arrivals_s=s_arrivals_s,
+        **real_arrivals,
         include_labels=True,
     )
 
@@ -720,11 +721,13 @@ def plot_signed_side_by_side(
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        time_shift_s=synthetic_display_shift_s,
-        include_labels=False,
+        # T is relative to source origin. The displayed waveform has already
+        # been shifted by -STF.t0; applying that shift to T again is incorrect.
+        include_labels=True,
     )
 
     ax_syn.set_title(f"Synthetic DAS: {initial_model}")
+    ax_syn.legend(loc="upper right", fontsize=8)
     ax_syn.set_xlabel("Physical reference channel")
 
     fig.colorbar(
@@ -760,6 +763,7 @@ def plot_envelope_side_by_side(
     synthetic_display_shift_s,
     initial_model,
     out_path,
+    real_arrivals,
 ):
     fig, axes = plt.subplots(
         1,
@@ -795,9 +799,7 @@ def plot_envelope_side_by_side(
 
     add_arrival_overlays(
         ax=ax_real,
-        arrival_channels=arrival_channels,
-        p_arrivals_s=p_arrivals_s,
-        s_arrivals_s=s_arrivals_s,
+        **real_arrivals,
         light=True,
         include_labels=True,
     )
@@ -838,12 +840,12 @@ def plot_envelope_side_by_side(
         arrival_channels=arrival_channels,
         p_arrivals_s=p_arrivals_s,
         s_arrivals_s=s_arrivals_s,
-        time_shift_s=synthetic_display_shift_s,
         light=True,
-        include_labels=False,
+        include_labels=True,
     )
 
     ax_syn.set_title(f"Synthetic envelope: {initial_model}")
+    ax_syn.legend(loc="upper right", fontsize=8)
     ax_syn.set_xlabel("Physical reference channel")
 
     fig.colorbar(
@@ -865,6 +867,54 @@ def plot_envelope_side_by_side(
 # =============================================================================
 # CLI
 # =============================================================================
+
+def predict_comparison_arrivals(real, synthetic, args, out_dir):
+    """Independent predictions for the real 3-D geometry and saved 2-D model."""
+    channels = np.asarray(real["raw_channels"], dtype=float)
+    lat, lon, tvd = receivers_from_channels(GEOMETRY_CSV, channels)
+    model3 = Zhang3D(args.phase_native_grid)
+    p3, s3, metadata3 = model3.predict(
+        source_lat=float(get_scalar(real, "ev_lat")),
+        source_lon=float(get_scalar(real, "ev_lon")),
+        source_depth_km=float(get_scalar(real, "ev_depth_km")),
+        receiver_lat=lat, receiver_lon=lon, receiver_tvd_m=tvd,
+        surface_elevation_m=SAFOD_SURFACE_ELEVATION_M,
+        **prediction_options(args),
+    )
+    index = np.asarray(synthetic["das_channel_indices"], dtype=int)
+    receivers2 = np.column_stack((synthetic["receiver_x"][index], synthetic["receiver_z"][index]))
+    source2 = np.array([float(get_scalar(synthetic, "source_x")), float(get_scalar(synthetic, "source_z"))])
+    axes = (synthetic["grid_x"], synthetic["grid_z"])
+    p2, backend2 = solve_eikonal(synthetic["vp"], axes, source2, receivers2, eiko_root=args.eiko_root)
+    s2, _ = solve_eikonal(synthetic["vs"], axes, source2, receivers2, eiko_root=args.eiko_root)
+    if "das_raw_channels" in synthetic.files:
+        channels2 = np.asarray(synthetic["das_raw_channels"], dtype=float)
+    else:
+        channels2 = nearest_geometry_channel_for_receivers(receivers2[:, 0], receivers2[:, 1], Path(GEOMETRY_CSV))
+    if channels2.shape != p2.shape:
+        raise ValueError("Synthetic DAS channel coordinates do not match receiver centres.")
+    metadata2 = dict(backend2, method="2-D eikonal FMM", model_name=args.initial_model,
+                     source_xz_m=source2.tolist(), time_reference="source origin; no STF shift")
+    order = np.argsort(channels)
+    real_arrivals = dict(arrival_channels=channels[order], p_arrivals_s=p3[order],
+                         s_arrivals_s=s3[order], model_label="Zhang 2009 3-D eikonal")
+    receiver_x, receiver_y = model3.coordinates.xy_m(lat, lon)
+    pd.DataFrame(dict(channel=channels, latitude=lat, longitude=lon, tvd_m=tvd,
+                      zhang_x_m=receiver_x, zhang_y_m=receiver_y,
+                      depth_msl_m=tvd-SAFOD_SURFACE_ELEVATION_M,
+                      p_time_s=p3, s_time_s=s3)).to_csv(
+        out_dir / "predicted_arrivals_real_3d.csv", index=False
+    )
+    pd.DataFrame(dict(channel=channels2, p_time_s=p2, s_time_s=s2)).to_csv(
+        out_dir / "predicted_arrivals_synthetic_2d.csv", index=False
+    )
+    provenance = dict(real=metadata3, synthetic=metadata2, observed_picks=False)
+    (out_dir / "predicted_arrivals_metadata.json").write_text(
+        json.dumps(provenance, indent=2), encoding="utf-8"
+    )
+    print("Real guides: Zhang 2009 3-D eikonal; synthetic guides: matching model 2-D eikonal")
+    return real_arrivals, p2, s2, provenance
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -888,6 +938,10 @@ def parse_args() -> argparse.Namespace:
         help=f"Initial velocity model. Default: {DEFAULT_INITIAL_MODEL}.",
     )
 
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--arrivals-only", action="store_true",
+                        help="Compute and save 3-D real / 2-D synthetic predictions without filtering waveforms.")
+    add_travel_time_arguments(parser)
     return parser.parse_args()
 
 
@@ -910,10 +964,10 @@ def main() -> None:
         args.initial_model,
     )
 
-    out_dir = comparison_dir_for_model(
+    out_dir = args.output_dir or comparison_dir_for_model(
         args.theta_deg,
         args.initial_model,
-    )
+    ) / "eikonal_3d"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("\nComparison inputs")
@@ -1027,6 +1081,13 @@ def main() -> None:
         model_type = str(
             get_scalar(synthetic, "model_type", "")
         )
+
+        real_arrivals, predicted_p_2d, predicted_s_2d, arrival_provenance = predict_comparison_arrivals(
+            real, synthetic, args, out_dir
+        )
+        if args.arrivals_only:
+            print(f"Predictions and provenance saved to {out_dir}")
+            return
 
         # ---------------------------------------------------------------------
         # Real DAS
@@ -1161,11 +1222,11 @@ def main() -> None:
             channel_mapping_source = "legacy nearest-geometry mapping"
 
         predicted_p_full = np.asarray(
-            synthetic["arrival_p_das"],
+            predicted_p_2d,
             dtype=np.float64,
         )
         predicted_s_full = np.asarray(
-            synthetic["arrival_swave_das"],
+            predicted_s_2d,
             dtype=np.float64,
         )
 
@@ -1370,6 +1431,9 @@ def main() -> None:
                     "real_package": str(real_pkg),
                     "synthetic_package": str(syn_pkg),
                     "observed_ridge_picker": "disabled",
+                    "real_prediction_method": arrival_provenance["real"]["method"],
+                    "real_prediction_model": arrival_provenance["real"]["model_name"],
+                    "synthetic_prediction_method": arrival_provenance["synthetic"]["method"],
                 }
             ]
         ).to_csv(summary_csv, index=False)
@@ -1391,12 +1455,9 @@ def main() -> None:
             real_signed_normalized=real_signed_norm,
             real_time_s=real_time,
             real_channels=real_channels,
-            arrival_channels=arrival_channels,
-            p_arrivals_s=predicted_p_unique,
-            s_arrivals_s=predicted_s_unique,
             event_id=event_id,
-            initial_model=args.initial_model,
             out_path=real_overlay,
+            real_arrivals=real_arrivals,
         )
 
         plot_signed_side_by_side(
@@ -1415,6 +1476,7 @@ def main() -> None:
             synthetic_display_shift_s=synthetic_display_shift_s,
             initial_model=args.initial_model,
             out_path=signed_comparison,
+            real_arrivals=real_arrivals,
         )
 
         plot_envelope_side_by_side(
@@ -1433,6 +1495,7 @@ def main() -> None:
             synthetic_display_shift_s=synthetic_display_shift_s,
             initial_model=args.initial_model,
             out_path=envelope_comparison,
+            real_arrivals=real_arrivals,
         )
 
     print("\nSaved outputs")

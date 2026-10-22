@@ -3,6 +3,11 @@
 A static site for viewing events of the SAFOD-deep archive: map, catalog and DAS QC plots.
 Built from `results/safod_deep/`; the normal command is `update_event_explorer` (below), publishing is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+P/S guides now default to native Zhang 2009 3-D eikonal predictions through
+EikoHypoTomo. The configured gallery is `event_qc_3d_eikonal/`; existing
+images are not recomputed by the site builder. Validate and regenerate the
+gallery first: [travel-time runbook](../docs/safod/travel_times.md).
+
 Static public earthquake/DAS viewer for SAFOD. "SAFOD-deep" is the name of the
 continuous deep-fibre DAS archive, not a selection of deep events.
 
@@ -69,8 +74,8 @@ the project root.
 | Input | Config key | Produced by |
 | --- | --- | --- |
 | `results/safod_deep/catalog/catalog_recorded.csv` | `catalog` | SAFOD-deep catalog step |
-| `results/safod_deep/event_qc/*.png` | `event_qc_dir` | SAFOD-deep event QC plots |
-| `results/safod_deep/event_qc/metadata/*.json` | `event_metadata_dir` | same step, one JSON per plot |
+| `results/safod_deep/event_qc_3d_eikonal/*.png` | `event_qc_dir` | SAFOD-deep event QC plots with native 3-D predictions |
+| `results/safod_deep/event_qc_3d_eikonal/metadata/*.json` | `event_metadata_dir` | same step, one JSON per plot |
 | `results/safod_deep/catalog/focal_mechanisms.json` (optional) | hard-coded in `builder/site_builder.py` | `fetch_focal_mechanisms` (below) |
 | `/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx` | `geometry_xlsx` | external workbook |
 | `web_safod/reference/san_andreas_fault.geojson` (optional) | `fault_geojson` | `prepare_fault_geometry` or `update_event_explorer` |
