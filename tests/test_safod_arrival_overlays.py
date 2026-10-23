@@ -35,11 +35,10 @@ def test_distinct_guides_and_no_double_source_time_shift(tmp_path, monkeypatch, 
             comparison.plot_signed_side_by_side(real_signed_normalized=data,
                 synthetic_signed_normalized=data, **options)
         fig = captured[-1]
-        for ax, expected, label in ((fig.axes[0], p3, "3-D"), (fig.axes[1], p2, "2-D")):
+        for ax, expected in ((fig.axes[0], p3), (fig.axes[1], p2)):
             line = next(line for line in ax.lines if line.get_label().startswith("Predicted P"))
-            assert label in line.get_label()
-            if ax is fig.axes[0]:
-                assert real_model in line.get_label()
+            assert line.get_label() == "Predicted P"
+            assert any(item.get_label() == "Predicted S" for item in ax.lines)
             np.testing.assert_array_equal(line.get_ydata(), expected)
     finally:
         for fig in captured:

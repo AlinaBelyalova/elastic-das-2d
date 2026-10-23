@@ -550,7 +550,7 @@ def add_arrival_overlays(
         color=colour,
         linestyle=":",
         linewidth=PREDICTED_P_LINEWIDTH,
-        label=f"Predicted P: {model_label}" if include_labels else None,
+        label="Predicted P" if include_labels else None,
         zorder=20,
     )
 
@@ -560,7 +560,7 @@ def add_arrival_overlays(
         color=colour,
         linestyle="--",
         linewidth=PREDICTED_S_LINEWIDTH,
-        label=f"Predicted S: {model_label}" if include_labels else None,
+        label="Predicted S" if include_labels else None,
         zorder=20,
     )
 
