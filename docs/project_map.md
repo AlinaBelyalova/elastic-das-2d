@@ -25,7 +25,7 @@ A short description of the packages is in the `src/__init__.py` docstring.
 | SBP-SAT | `src/sbp_sat/`: `operators.py` (1-D SBP operators on a staggered grid, 4th order in the interior, 2nd at the boundary), `elastic2d.py` (2-D forward, adjoint, gradient with respect to log Vp / log Vs); formulas: [method.md](sbp_sat/method.md) |
 | SAFOD velocity models | `src/safod/models/`: `factory.py` (`build_initial_model` by name; list of names: `AVAILABLE_INITIAL_MODELS`) and one module per model |
 | SAFOD model figures | `src/safod/plotting.py` |
-| SAFOD predicted P/S | `src/safod/travel_times.py`: Zhang 2009 3-D, then original Lin 2010 on coverage errors (`src/safod/lin2010.py`); matching-model 2-D eikonal for synthetics; [runbook](safod/travel_times.md) |
+| SAFOD predicted P/S | `src/safod/travel_times.py`: Zhang 2009 3-D, then original Lin 2010 on coverage errors (`src/safod/lin2010.py`), through EikoHypoTomo; one shared 3-D reference for real and synthetic comparison panels; [runbook](safod/travel_times.md) |
 | SAFOD-deep archive | `src/safod_deep/catalog.py`: inventory of HDF5 recordings, NCEDC catalog, 3-D cable geometry |
 
 `safod_deep` is the continuous-recording archive of the SAFOD-deep fiber (HDF5

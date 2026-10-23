@@ -31,7 +31,7 @@ from src.common.signal_processing import bandpass_traces, median_welch_psd
 from src.safod.models import AVAILABLE_INITIAL_MODELS
 from src.safod.travel_times import (
     add_travel_time_arguments, prediction_options, regional_model_from_args,
-    receivers_from_channels, solve_eikonal,
+    receivers_from_channels,
 )
 
 
@@ -517,6 +517,38 @@ def plot_frequency_qc(
 # PLOTTING
 # =============================================================================
 
+def comparison_view_limits(
+    *, real_channels, synthetic_channels, real_time_s, synthetic_time_display_s,
+):
+    """Use the same supported channel/time window on both panels, from t=0.
+
+    Cropping the viewport preserves sample coordinates. In particular, do not
+    stretch the synthetic image to the real extent or shift its time axis again.
+    """
+    bounds = []
+    for name, values in (
+        ("real channels", real_channels),
+        ("synthetic channels", synthetic_channels),
+        ("real time", real_time_s),
+        ("synthetic display time", synthetic_time_display_s),
+    ):
+        values = np.asarray(values, dtype=float)
+        if values.ndim != 1 or values.size < 2 or not np.all(np.isfinite(values)):
+            raise ValueError(f"{name} must contain at least two finite coordinates.")
+        bounds.append((float(values.min()), float(values.max())))
+
+    real_x, syn_x, real_t, syn_t = bounds
+    x_min, x_max = max(real_x[0], syn_x[0]), min(real_x[1], syn_x[1])
+    if x_min >= x_max:
+        raise ValueError("Real and synthetic channel ranges do not overlap.")
+    if real_t[0] > 0.0 or syn_t[0] > 0.0:
+        raise ValueError("Both displayed waveform time ranges must include catalog origin (0 s).")
+    t_max = min(real_t[1], syn_t[1], TMAX_REAL_S, TMAX_SYN_DISPLAY_S)
+    if t_max <= 0.0:
+        raise ValueError("Real and synthetic waveforms have no common post-origin time interval.")
+    return (x_min, x_max), (t_max, 0.0)
+
+
 def add_arrival_overlays(
     *,
     ax,
@@ -526,7 +558,7 @@ def add_arrival_overlays(
     time_shift_s: float = 0.0,
     light: bool = False,
     include_labels: bool = True,
-    model_label: str = "2-D eikonal (synthetic model)",
+    model_label: str = "3-D eikonal",
 ) -> None:
     colour = (
         PREDICTED_ARRIVAL_COLOR_LIGHT
@@ -572,7 +604,7 @@ def plot_real_with_arrivals(
     real_channels,
     event_id,
     out_path,
-    real_arrivals,
+    shared_arrivals,
 ):
     fig, ax = plt.subplots(figsize=(11, 8))
 
@@ -601,9 +633,13 @@ def plot_real_with_arrivals(
 
     add_arrival_overlays(
         ax=ax,
-        **real_arrivals,
+        **shared_arrivals,
         include_labels=True,
     )
+
+    # Model guides outside the recorded window must not expand the image axes.
+    ax.set_xlim(float(real_channels.min()), float(real_channels.max()))
+    ax.set_ylim(float(real_time_s[-1]), float(real_time_s[0]))
 
     fig.colorbar(
         im,
@@ -613,7 +649,7 @@ def plot_real_with_arrivals(
 
     ax.set_title(
         f"{event_id} real DAS with predicted arrivals\n"
-        f"{real_arrivals['model_label']}"
+        f"{shared_arrivals['model_label']}"
     )
     ax.set_xlabel("Physical reference channel")
     ax.set_ylabel("Time from catalog origin [s]")
@@ -636,21 +672,23 @@ def plot_signed_side_by_side(
     synthetic_signed_normalized,
     synthetic_time_display_s,
     synthetic_channels,
-    arrival_channels,
-    p_arrivals_s,
-    s_arrivals_s,
     event_id,
     source_f0_hz,
     source_theta_deg,
     synthetic_display_shift_s,
     initial_model,
     out_path,
-    real_arrivals,
+    shared_arrivals,
 ):
+    channel_limits, time_limits = comparison_view_limits(
+        real_channels=real_channels, synthetic_channels=synthetic_channels,
+        real_time_s=real_time_s, synthetic_time_display_s=synthetic_time_display_s,
+    )
     fig, axes = plt.subplots(
         1,
         2,
         figsize=(18, 7),
+        sharex=True,
         sharey=True,
     )
 
@@ -681,7 +719,7 @@ def plot_signed_side_by_side(
 
     add_arrival_overlays(
         ax=ax_real,
-        **real_arrivals,
+        **shared_arrivals,
         include_labels=True,
     )
 
@@ -718,9 +756,7 @@ def plot_signed_side_by_side(
 
     add_arrival_overlays(
         ax=ax_syn,
-        arrival_channels=arrival_channels,
-        p_arrivals_s=p_arrivals_s,
-        s_arrivals_s=s_arrivals_s,
+        **shared_arrivals,
         # T is relative to source origin. The displayed waveform has already
         # been shifted by -STF.t0; applying that shift to T again is incorrect.
         include_labels=True,
@@ -729,6 +765,12 @@ def plot_signed_side_by_side(
     ax_syn.set_title(f"Synthetic DAS: {initial_model}")
     ax_syn.legend(loc="upper right", fontsize=8)
     ax_syn.set_xlabel("Physical reference channel")
+
+    # Set limits after images and guides: shared 3-D curves can extend beyond
+    # the synthetic gauge centres and otherwise trigger autoscale margins.
+    for ax in axes:
+        ax.set_xlim(*channel_limits)
+        ax.set_ylim(*time_limits)
 
     fig.colorbar(
         syn_im,
@@ -754,21 +796,23 @@ def plot_envelope_side_by_side(
     synthetic_envelope_normalized,
     synthetic_time_display_s,
     synthetic_channels,
-    arrival_channels,
-    p_arrivals_s,
-    s_arrivals_s,
     event_id,
     source_f0_hz,
     source_theta_deg,
     synthetic_display_shift_s,
     initial_model,
     out_path,
-    real_arrivals,
+    shared_arrivals,
 ):
+    channel_limits, time_limits = comparison_view_limits(
+        real_channels=real_channels, synthetic_channels=synthetic_channels,
+        real_time_s=real_time_s, synthetic_time_display_s=synthetic_time_display_s,
+    )
     fig, axes = plt.subplots(
         1,
         2,
         figsize=(18, 7),
+        sharex=True,
         sharey=True,
     )
 
@@ -799,7 +843,7 @@ def plot_envelope_side_by_side(
 
     add_arrival_overlays(
         ax=ax_real,
-        **real_arrivals,
+        **shared_arrivals,
         light=True,
         include_labels=True,
     )
@@ -837,9 +881,7 @@ def plot_envelope_side_by_side(
 
     add_arrival_overlays(
         ax=ax_syn,
-        arrival_channels=arrival_channels,
-        p_arrivals_s=p_arrivals_s,
-        s_arrivals_s=s_arrivals_s,
+        **shared_arrivals,
         light=True,
         include_labels=True,
     )
@@ -847,6 +889,10 @@ def plot_envelope_side_by_side(
     ax_syn.set_title(f"Synthetic envelope: {initial_model}")
     ax_syn.legend(loc="upper right", fontsize=8)
     ax_syn.set_xlabel("Physical reference channel")
+
+    for ax in axes:
+        ax.set_xlim(*channel_limits)
+        ax.set_ylim(*time_limits)
 
     fig.colorbar(
         syn_im,
@@ -868,8 +914,8 @@ def plot_envelope_side_by_side(
 # CLI
 # =============================================================================
 
-def predict_comparison_arrivals(real, synthetic, args, out_dir):
-    """Independent predictions for the real 3-D geometry and saved 2-D model."""
+def predict_comparison_arrivals(real, args, out_dir):
+    """Compute one origin-relative 3-D reference for both comparison panels."""
     channels = np.asarray(real["raw_channels"], dtype=float)
     lat, lon, tvd = receivers_from_channels(GEOMETRY_CSV, channels)
     model3 = regional_model_from_args(args)
@@ -881,23 +927,18 @@ def predict_comparison_arrivals(real, synthetic, args, out_dir):
         surface_elevation_m=SAFOD_SURFACE_ELEVATION_M,
         **prediction_options(args),
     )
-    index = np.asarray(synthetic["das_channel_indices"], dtype=int)
-    receivers2 = np.column_stack((synthetic["receiver_x"][index], synthetic["receiver_z"][index]))
-    source2 = np.array([float(get_scalar(synthetic, "source_x")), float(get_scalar(synthetic, "source_z"))])
-    axes = (synthetic["grid_x"], synthetic["grid_z"])
-    p2, backend2 = solve_eikonal(synthetic["vp"], axes, source2, receivers2, eiko_root=args.eiko_root)
-    s2, _ = solve_eikonal(synthetic["vs"], axes, source2, receivers2, eiko_root=args.eiko_root)
-    if "das_raw_channels" in synthetic.files:
-        channels2 = np.asarray(synthetic["das_raw_channels"], dtype=float)
-    else:
-        channels2 = nearest_geometry_channel_for_receivers(receivers2[:, 0], receivers2[:, 1], Path(GEOMETRY_CSV))
-    if channels2.shape != p2.shape:
-        raise ValueError("Synthetic DAS channel coordinates do not match receiver centres.")
-    metadata2 = dict(backend2, method="2-D eikonal FMM", model_name=args.initial_model,
-                     source_xz_m=source2.tolist(), time_reference="source origin; no STF shift")
+    p3, s3 = np.asarray(p3, dtype=float), np.asarray(s3, dtype=float)
+    if p3.shape != channels.shape or s3.shape != channels.shape:
+        raise ValueError("3-D predictions do not match the physical reference channels.")
+    valid = np.isfinite(channels) & np.isfinite(p3) & np.isfinite(s3)
+    if np.count_nonzero(valid) < 2:
+        raise RuntimeError("Too few valid 3-D arrival channels.")
+    metadata3 = dict(metadata3, time_reference="catalog origin; no STF shift")
     order = np.argsort(channels)
-    real_arrivals = dict(arrival_channels=channels[order], p_arrivals_s=p3[order],
-                         s_arrivals_s=s3[order], model_label=metadata3["model_label"] + " eikonal")
+    shared_arrivals = dict(
+        arrival_channels=channels[order], p_arrivals_s=p3[order],
+        s_arrivals_s=s3[order], model_label=metadata3["model_label"] + " eikonal",
+    )
     receiver_x, receiver_y = model3.coordinates.xy_m(lat, lon)
     # Retain the existing Zhang-coordinate CSV columns with their actual
     # meaning; Lin EN coordinates get separate, explicitly named columns.
@@ -912,16 +953,20 @@ def predict_comparison_arrivals(real, synthetic, args, out_dir):
                       p_time_s=p3, s_time_s=s3)).to_csv(
         out_dir / "predicted_arrivals_real_3d.csv", index=False
     )
-    pd.DataFrame(dict(channel=channels2, p_time_s=p2, s_time_s=s2)).to_csv(
-        out_dir / "predicted_arrivals_synthetic_2d.csv", index=False
+    # Keep the established real/synthetic metadata keys, now describing the
+    # very same reference. The elastic waveform still uses its saved 2-D model.
+    provenance = dict(
+        real=metadata3, synthetic=metadata3, observed_picks=False,
+        shared_reference=True, reference_csv="predicted_arrivals_real_3d.csv",
+        overlay_panels=["real", "synthetic"],
+        synthetic_waveform_model=args.initial_model, synthetic_waveform_dimension=2,
     )
-    provenance = dict(real=metadata3, synthetic=metadata2, observed_picks=False)
     (out_dir / "predicted_arrivals_metadata.json").write_text(
         json.dumps(provenance, indent=2), encoding="utf-8"
     )
-    print(f"Real guides: {metadata3['model_label']} eikonal; "
-          "synthetic guides: matching model 2-D eikonal")
-    return real_arrivals, p2, s2, provenance
+    print(f"Shared real/synthetic guides: {metadata3['model_label']} eikonal; "
+          "synthetic waveform: saved 2-D elastic model")
+    return shared_arrivals, provenance
 
 
 def parse_args() -> argparse.Namespace:
@@ -948,7 +993,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--arrivals-only", action="store_true",
-                        help="Compute and save 3-D real / 2-D synthetic predictions without filtering waveforms.")
+                        help="Save shared 3-D predictions for real and synthetic panels without filtering waveforms.")
     add_travel_time_arguments(parser)
     return parser.parse_args()
 
@@ -1090,8 +1135,8 @@ def main() -> None:
             get_scalar(synthetic, "model_type", "")
         )
 
-        real_arrivals, predicted_p_2d, predicted_s_2d, arrival_provenance = predict_comparison_arrivals(
-            real, synthetic, args, out_dir
+        shared_arrivals, arrival_provenance = predict_comparison_arrivals(
+            real, args, out_dir
         )
         if args.arrivals_only:
             print(f"Predictions and provenance saved to {out_dir}")
@@ -1229,26 +1274,13 @@ def main() -> None:
             synthetic_channels_full = receiver_channels[das_idx]
             channel_mapping_source = "legacy nearest-geometry mapping"
 
-        predicted_p_full = np.asarray(
-            predicted_p_2d,
-            dtype=np.float64,
-        )
-        predicted_s_full = np.asarray(
-            predicted_s_2d,
-            dtype=np.float64,
-        )
-
         ntr = synthetic_unfiltered.shape[0]
 
-        for name, array in (
-            ("synthetic_channels", synthetic_channels_full),
-            ("arrival_p_das", predicted_p_full),
-            ("arrival_swave_das", predicted_s_full),
-        ):
-            if array.shape[0] != ntr:
-                raise ValueError(
-                    f"{name} length {array.shape[0]} != ntraces {ntr}."
-                )
+        if synthetic_channels_full.shape[0] != ntr:
+            raise ValueError(
+                f"synthetic_channels length {synthetic_channels_full.shape[0]} "
+                f"!= ntraces {ntr}."
+            )
 
         print(
             f"Filtering synthetic DAS to "
@@ -1287,43 +1319,19 @@ def main() -> None:
             synthetic_channels,
             synthetic_data,
             synthetic_envelope,
-            predicted_p,
-            predicted_s,
         ) = sort_by_channel(
             synthetic_channels_full,
             synthetic_data,
             synthetic_envelope,
-            predicted_p_full,
-            predicted_s_full,
         )
 
         synthetic_signed_norm = trace_normalize(synthetic_data)
         synthetic_envelope_norm = trace_normalize(synthetic_envelope)
 
-        (
-            arrival_channels,
-            predicted_p_unique,
-            predicted_s_unique,
-        ) = collapse_duplicate_channels(
-            synthetic_channels,
-            predicted_p,
-            predicted_s,
+        channel_limits, time_limits = comparison_view_limits(
+            real_channels=real_channels, synthetic_channels=synthetic_channels,
+            real_time_s=real_time, synthetic_time_display_s=synthetic_time_display,
         )
-
-        arrival_mask = (
-            np.isfinite(arrival_channels)
-            & np.isfinite(predicted_p_unique)
-            & np.isfinite(predicted_s_unique)
-            & (arrival_channels >= np.nanmin(real_channels))
-            & (arrival_channels <= np.nanmax(real_channels))
-        )
-
-        arrival_channels = arrival_channels[arrival_mask]
-        predicted_p_unique = predicted_p_unique[arrival_mask]
-        predicted_s_unique = predicted_s_unique[arrival_mask]
-
-        if arrival_channels.size < 2:
-            raise RuntimeError("Too few valid arrival channels.")
 
         # ---------------------------------------------------------------------
         # Frequency QC
@@ -1349,12 +1357,10 @@ def main() -> None:
             out_csv=frequency_csv,
         )
 
-        p_finite = predicted_p_unique[
-            np.isfinite(predicted_p_unique)
-        ]
-        s_finite = predicted_s_unique[
-            np.isfinite(predicted_s_unique)
-        ]
+        p_finite = shared_arrivals["p_arrivals_s"]
+        p_finite = p_finite[np.isfinite(p_finite)]
+        s_finite = shared_arrivals["s_arrivals_s"]
+        s_finite = s_finite[np.isfinite(s_finite)]
 
         p_min = float(np.min(p_finite))
         p_max = float(np.max(p_finite))
@@ -1400,6 +1406,8 @@ def main() -> None:
         )
         print(f"P arrival range          : {p_min:.3f} to {p_max:.3f} s")
         print(f"S arrival range          : {s_min:.3f} to {s_max:.3f} s")
+        print(f"common plotted channels  : {channel_limits[0]:.1f} to {channel_limits[1]:.1f}")
+        print(f"common plotted time      : {time_limits[1]:.3f} to {time_limits[0]:.3f} s")
         print(
             f"synthetic display shift  : "
             f"{synthetic_display_shift_s:+.3f} s"
@@ -1442,6 +1450,12 @@ def main() -> None:
                     "real_prediction_method": arrival_provenance["real"]["method"],
                     "real_prediction_model": arrival_provenance["real"]["model_name"],
                     "synthetic_prediction_method": arrival_provenance["synthetic"]["method"],
+                    "synthetic_prediction_model": arrival_provenance["synthetic"]["model_name"],
+                    "shared_3d_prediction_reference": True,
+                    "comparison_channel_min": channel_limits[0],
+                    "comparison_channel_max": channel_limits[1],
+                    "comparison_time_min_s": time_limits[1],
+                    "comparison_time_max_s": time_limits[0],
                 }
             ]
         ).to_csv(summary_csv, index=False)
@@ -1465,7 +1479,7 @@ def main() -> None:
             real_channels=real_channels,
             event_id=event_id,
             out_path=real_overlay,
-            real_arrivals=real_arrivals,
+            shared_arrivals=shared_arrivals,
         )
 
         plot_signed_side_by_side(
@@ -1475,16 +1489,13 @@ def main() -> None:
             synthetic_signed_normalized=synthetic_signed_norm,
             synthetic_time_display_s=synthetic_time_display,
             synthetic_channels=synthetic_channels,
-            arrival_channels=arrival_channels,
-            p_arrivals_s=predicted_p_unique,
-            s_arrivals_s=predicted_s_unique,
             event_id=event_id,
             source_f0_hz=source_f0_hz,
             source_theta_deg=source_theta_deg,
             synthetic_display_shift_s=synthetic_display_shift_s,
             initial_model=args.initial_model,
             out_path=signed_comparison,
-            real_arrivals=real_arrivals,
+            shared_arrivals=shared_arrivals,
         )
 
         plot_envelope_side_by_side(
@@ -1494,16 +1505,13 @@ def main() -> None:
             synthetic_envelope_normalized=synthetic_envelope_norm,
             synthetic_time_display_s=synthetic_time_display,
             synthetic_channels=synthetic_channels,
-            arrival_channels=arrival_channels,
-            p_arrivals_s=predicted_p_unique,
-            s_arrivals_s=predicted_s_unique,
             event_id=event_id,
             source_f0_hz=source_f0_hz,
             source_theta_deg=source_theta_deg,
             synthetic_display_shift_s=synthetic_display_shift_s,
             initial_model=args.initial_model,
             out_path=envelope_comparison,
-            real_arrivals=real_arrivals,
+            shared_arrivals=shared_arrivals,
         )
 
     print("\nSaved outputs")

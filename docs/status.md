@@ -52,8 +52,10 @@ one at a time, with an adjoint operator check after each addition.
 
 Zhang 2009 remains the first 3-D arrival model for observations; original
 separate Lin 2010 Vp/Vs are now selected only after a Zhang coverage error.
-Synthetic panels retain their matching 2-D model. Local original-Lin coverage
-passed for all 291 published sources and 2991 fibre horizontal points.
+Real and synthetic comparison panels now share one 3-D P/S reference computed
+from the catalogue source and real receiver geometry through EikoHypoTomo.
+Synthetic waveforms retain their saved 2-D elastic model. Local original-Lin
+coverage passed for all 291 published sources and 2991 fibre horizontal points.
 Public-wrapper FMM passed at the wellhead/turnaround for a deep event,
 the deepest/distant event, and a negative-depth event. For nc75379216,
 200-to-100 m refinement differences were at most 1.785 ms P / 2.619 ms S.
@@ -64,9 +66,17 @@ Ordinary compare_event runs now update the existing compare/dc<theta>/<model>/
 PNGs and prediction CSV/JSON directly, without an eikonal_3d subdirectory.
 The configured 0-20 Hz filter is supported as a 20 Hz low-pass; positive
 bandpass output is bit-identical to the previous implementation. Local checks
-passed: 49 tests and a full comparison/output-routing smoke run with
-manufactured waveform packages and stubbed travel-time solves. Real-event
-rerendering still requires the prepared Sherlock packages.
+passed: 55 tests and full comparison/output-routing smoke runs for Zhang and
+Lin metadata with manufactured waveform packages and stubbed 3-D predictions.
+All five overlays per comparison used exactly the same channel/time arrays;
+summary metadata and arrivals-only output agreed. Real-event rerendering still
+requires the prepared Sherlock packages.
+
+Comparison axes are now fixed to the common physical-channel range and
+0-to-common-end catalogue time (at most 2 s). Shared guides no longer expand
+the synthetic viewport into blank margins. Regression checks cover signed
+and envelope plots, unequal channel/time coverage, identical P/S curves,
+unchanged image extents, and the real-only pre-origin window.
 
 1. **Event 2026-10-03: v3 or v5.** For nc75443276 there are two versions of
    the DAS vs MH030 comparison: `plot_oct03_m08_das_mh030_pb_v3.py` (zero phase,

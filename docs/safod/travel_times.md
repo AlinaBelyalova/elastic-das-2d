@@ -1,12 +1,14 @@
 # Predicted P/S travel times
 
 These are model-based first-arrival guides, not waveform picks or ground-truth
-labels. The website and real-data panel of `compare_event` share
+labels. The website and both panels of `compare_event` share
 `src/safod/travel_times.py`: native Zhang, Thurber & Bedrosian (2009) 3-D Vp
 and Vs, switching to the original separate Lin et al. (2010) fields only on
-a Zhang coverage error. Both use EikoHypoTomo/PyKonal. The synthetic panel uses a separate 2-D
-eikonal calculation on the exact Vp/Vs arrays saved in its forward NPZ.
-The elastic solver remains 2-D.
+a Zhang coverage error. Both models use EikoHypoTomo/PyKonal. `compare_event`
+calculates one pair of curves from the catalogue source and real receiver
+geometry, then plots identical channel/time coordinates on real and synthetic
+panels. The elastic solver remains 2-D; these shared references do not predict
+the exact first arrivals of its different 2-D medium.
 
 ## Zhang coordinates and model support
 
@@ -197,8 +199,11 @@ SAFOD_EVENT_KEY=nc75379261 $GEO -m scripts.safod.compare_event \
 This calculates curves without loading/filtering waveforms or rerunning the
 elastic simulation. The matching forward package and prepared channel
 geometry must exist. The standard model comparison directory
-`results/events/<event>/compare/dc<theta>/<model>/` receives `predicted_arrivals_real_3d.csv`,
-`predicted_arrivals_synthetic_2d.csv`, and `predicted_arrivals_metadata.json`.
+`results/events/<event>/compare/dc<theta>/<model>/` receives
+`predicted_arrivals_real_3d.csv` (the shared reference for both panels) and
+`predicted_arrivals_metadata.json`. No new synthetic 2-D prediction CSV is
+written. Historical `predicted_arrivals_synthetic_2d.csv` files are not used;
+the metadata's `reference_csv` identifies the active reference.
 
 Ordinary runs update the existing comparison PNG/CSV files in that same
 directory; they do not create an eikonal_3d subdirectory. --arrivals-only
@@ -207,12 +212,25 @@ explicit --output-dir under `results/validation/safod/travel_times_3d/`
 only for convergence experiments. --phase-3d-spacing-m 50 and
 --phase-3d-padding-m 6000 affect calculation parameters, not directory names.
 
-Omit `--arrivals-only` for the full comparison. The real panel shows 3-D
-Zhang guides and the synthetic panel matching-model 2-D guides. Both are
-origin-relative: shift only the synthetic waveform axis by `-STF.t0`, not
-the predicted travel times a second time. Existing `predicted_*_min/max_s`
-summary fields still describe synthetic guides; added method/model columns
-identify their provenance.
+Omit `--arrivals-only` for the full comparison. Both panels show the same
+3-D Zhang guides, or the same complete Lin model after a Zhang coverage error.
+Times are catalogue-origin-relative: shift only the synthetic waveform axis
+by `-STF.t0`, not the predicted travel times a second time. Labels remain
+`Predicted P` and `Predicted S`. `predicted_*_min/max_s` summary fields describe
+the shared 3-D reference. Real/synthetic prediction method/model metadata are
+identical; `shared_reference` is true and the separate `synthetic_waveform_*`
+fields record the 2-D elastic model. Updating curves requires no forward rerun.
+
+The signed/envelope comparisons use identical fixed axes on both panels:
+catalogue time 0 to the smaller available end time (at most 2 s), and the
+intersection of the real and synthetic physical-channel ranges. Synthetic
+gauge centres do not cover all end receivers. Guides outside their range
+must not autoscale the axes or add blank strips. Image extents retain the
+original channel/time coordinates: no stretching, padding, channel renumbering
+or extra time shift is applied. Missing origin-time coverage fails explicitly.
+The real-only figure retains its recorded pre-origin window. The comparison
+summary records the actual common viewport in comparison_channel_min/max and
+comparison_time_min/max_s, separately from each waveform's available range.
 
 The configured common filter is 0-20 Hz: fmin=0 selects a zero-phase
 Butterworth low-pass at 20 Hz, keeping the configured frequency bounds.

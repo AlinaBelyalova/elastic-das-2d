@@ -156,9 +156,11 @@ replaces an existing forward package; retain the intended --nt when rerunning
 (default 12000 steps). The full comparison needs PyKonal and EikoHypoTomo,
 installed in geo, while the forward model runs in fwi.
 
-Predicted P/S now use native Zhang 2009 3-D eikonal times for real data,
-switching to original Lin 2010 Vp/Vs on Zhang coverage errors,
-and the saved forward model's 2-D eikonal times for synthetics. The new
+Predicted P/S on both real and synthetic panels use one shared set of native
+Zhang 2009 3-D eikonal times, switching to original Lin 2010 Vp/Vs on Zhang
+coverage errors. One EikoHypoTomo calculation uses the catalogue source and
+real receiver geometry; the same curves are drawn on both panels. The elastic
+waveform remains 2-D and need not match this 3-D reference exactly. The
 `--arrivals-only` mode computes curves without filtering or rerunning the
 elastic solver. Geometry, numerical checks, commands and output conventions
 are documented in [travel_times.md](travel_times.md).
@@ -168,6 +170,12 @@ directory, including prediction CSV/JSON and the usual PNGs. No separate
 eikonal_3d directory is created. The configured 0-20 Hz comparison filter
 is implemented as a 20 Hz low-pass; positive lower corners retain bandpass
 behaviour.
+
+Signed and envelope panels share fixed channel and time limits: the overlapping
+physical-channel range, from catalogue origin (0 s) to their common available
+end time, capped at 2 s. This prevents 3-D overlays from expanding the synthetic
+axes beyond its gauge-centre coverage. Coordinates and the existing -STF.t0
+waveform display shift are preserved. The real-only plot retains pre-event data.
 
 - `--initial-model` has different defaults: `run_forward` uses
   `bill_logs`, `compare_event` uses `hybrid_zhang2009_boness2006_bill_logs`
