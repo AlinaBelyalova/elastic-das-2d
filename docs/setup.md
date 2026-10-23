@@ -38,7 +38,7 @@ the project root (section 5).
 
 **`fwi`** is the main environment: `src/`, `scripts/validation/`,
 `scripts/examples/`, `scripts/benchmarks/`, `scripts.safod.run_forward`,
-`scripts.safod.compare_event`, `web_safod/`, tests (pytest is only here).
+`web_safod/`, tests (pytest is only here).
 
 **`geo`** is needed by everything that imports `DASutils`: it imports `pyDAS`,
 and `pyDAS` is built only for Python 3.9
@@ -58,6 +58,9 @@ modules fail with `ModuleNotFoundError: No module named 'pyDAS'`:
 
 P/S travel-time curves in `scripts.safod_deep.plot_catalog_events` are computed
 with EikoHypoTomo, which needs `pykonal` (only in `geo`).
+The same applies to the full `scripts.safod.compare_event` and its
+--arrivals-only mode: use geo to compute the predictions; importing and
+unit-testing that module does not require PyKonal.
 
 In `geo` all modules of `src/`, `scripts/` (except `scripts/legacy/`) and
 `web_safod/` import; in `fwi`, all except those listed above. The other

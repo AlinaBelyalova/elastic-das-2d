@@ -60,6 +60,14 @@ the deepest/distant event, and a negative-depth event. For nc75379216,
 The full-channel pilot and gallery regeneration with the new code still
 require Sherlock. See [travel-time validation](safod/travel_times.md).
 
+Ordinary compare_event runs now update the existing compare/dc<theta>/<model>/
+PNGs and prediction CSV/JSON directly, without an eikonal_3d subdirectory.
+The configured 0-20 Hz filter is supported as a 20 Hz low-pass; positive
+bandpass output is bit-identical to the previous implementation. Local checks
+passed: 49 tests and a full comparison/output-routing smoke run with
+manufactured waveform packages and stubbed travel-time solves. Real-event
+rerendering still requires the prepared Sherlock packages.
+
 1. **Event 2026-10-03: v3 or v5.** For nc75443276 there are two versions of
    the DAS vs MH030 comparison: `plot_oct03_m08_das_mh030_pb_v3.py` (zero phase,
    `sosfiltfilt`; writes `compare/das_mh030_comparison_v3_zerophase`) and

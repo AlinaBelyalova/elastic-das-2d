@@ -196,13 +196,16 @@ SAFOD_EVENT_KEY=nc75379261 $GEO -m scripts.safod.compare_event \
 
 This calculates curves without loading/filtering waveforms or rerunning the
 elastic simulation. The matching forward package and prepared channel
-geometry must exist. A new `eikonal_3d/` subdirectory under the model
-comparison directory receives `predicted_arrivals_real_3d.csv`,
+geometry must exist. The standard model comparison directory
+`results/events/<event>/compare/dc<theta>/<model>/` receives `predicted_arrivals_real_3d.csv`,
 `predicted_arrivals_synthetic_2d.csv`, and `predicted_arrivals_metadata.json`.
 
-Use `--output-dir` for a separate experiment directory. Repeat with
-`--phase-3d-spacing-m 50 --phase-3d-padding-m 6000` and compare predictions
-in seconds channel by channel to assess grid/padding sensitivity.
+Ordinary runs update the existing comparison PNG/CSV files in that same
+directory; they do not create an eikonal_3d subdirectory. --arrivals-only
+updates just the prediction CSV/JSON files, without changing PNGs. Use an
+explicit --output-dir under `results/validation/safod/travel_times_3d/`
+only for convergence experiments. --phase-3d-spacing-m 50 and
+--phase-3d-padding-m 6000 affect calculation parameters, not directory names.
 
 Omit `--arrivals-only` for the full comparison. The real panel shows 3-D
 Zhang guides and the synthetic panel matching-model 2-D guides. Both are
@@ -211,10 +214,10 @@ the predicted travel times a second time. Existing `predicted_*_min/max_s`
 summary fields still describe synthetic guides; added method/model columns
 identify their provenance.
 
-The existing full-comparison filter setting `COMMON_FMIN_HZ=0.0` remains
-incompatible with `bandpass_traces`. Choosing a positive bandpass lower
-corner versus a low-pass is a separate scientific decision. The
-`--arrivals-only` path does not invoke filtering.
+The configured common filter is 0-20 Hz: fmin=0 selects a zero-phase
+Butterworth low-pass at 20 Hz, keeping the configured frequency bounds.
+A positive fmin selects the existing bandpass. Detrending, tapering and
+filter order are unchanged. The --arrivals-only path does not filter.
 
 ## Website pilot and regeneration
 

@@ -72,7 +72,7 @@ Script paths are relative to `scripts/safod/`.
 | 6. Observation preparation | `prepare_event.py` | geo | `input_patterns`, `GEO_XLSX`, NCEDC, CSV from `channel_mapping_csv` | `results/events/<EVENT_KEY>/real/`: `real_das_event_window.npz`, `SAFOD_Phase2_projected_from_georef.csv`, `full_cable_qc_registration.csv`, PNG | `SAFOD_EVENT_KEY=<nc_key> $GEO -m scripts.safod.prepare_event` |
 | 7. Initial-model inputs (once) | `velocity_models/...` | fwi | `data/safod/velocity_models/*/raw` etc. | `data/safod/velocity_models/*/{processed,qc}` | section "Initial models" |
 | 8. Forward | `run_forward.py` | fwi | `real/real_das_event_window.npz`, model inputs | `results/events/<EVENT_KEY>/forward/dc<θ>/<model>/`: `outputs_safod_initial_forward.npz`, PNG; without `--no-gif` also `snapshots_vz.npz` and GIF | `SAFOD_EVENT_KEY=<nc_key> $FWI -m scripts.safod.run_forward --theta-deg <θ> --initial-model <model>` |
-| 9. Comparison with synthetics | `compare_event.py` | fwi | `real/real_das_event_window.npz`, `real/SAFOD_Phase2_projected_from_georef.csv`, stage 8 package with the same θ and model | `results/events/<EVENT_KEY>/compare/dc<θ>/<model>/` | `SAFOD_EVENT_KEY=<nc_key> $FWI -m scripts.safod.compare_event --theta-deg <θ> --initial-model <model>` |
+| 9. Comparison with synthetics | `compare_event.py` | geo | `real/real_das_event_window.npz`, `real/SAFOD_Phase2_projected_from_georef.csv`, stage 8 package with the same θ and model | `results/events/<EVENT_KEY>/compare/dc<θ>/<model>/` | `SAFOD_EVENT_KEY=<nc_key> $GEO -m scripts.safod.compare_event --theta-deg <θ> --initial-model <model>` |
 | 10. DAS and borehole geophone | `plot_das_geophone_two_physical_comparisons.py` | geo | set in the code: HDF5 of event NC75336802, channel 1694, SF.MH029.01.GP1; NCEDC; `GEO_XLSX` | `--output-dir`, default `results/events/20260401_75336802/compare/das_geophone_physical_pairs/` | `$GEO -m scripts.safod.plot_das_geophone_two_physical_comparisons --output-dir results/events/20260401_75336802/compare/<analysis>` |
 
 Stages 1–3 and 6 have no command-line parameters: settings are constants at
@@ -133,12 +133,41 @@ is solved separately: `plot_catalog_events --prepare-geometry` (part B).
 
 ### run_forward and compare_event
 
+For the already prepared reference event, run from the project root on a
+compute node. To refresh comparison figures with existing synthetics:
+
+```bash
+GEO=/home/groups/ettore88/alina/.envs/geo/bin/python
+SAFOD_EVENT_KEY=nc75379261 $GEO -m scripts.safod.compare_event \
+  --theta-deg 35 --initial-model hybrid_zhang2009_boness2006_bill_logs
+```
+
+To calculate a forward model when its NPZ is absent:
+
+```bash
+FWI=/home/groups/ettore88/alina/.envs/fwi/bin/python
+SAFOD_EVENT_KEY=nc75379261 $FWI -m scripts.safod.run_forward \
+  --theta-deg 35 --initial-model hybrid_zhang2009_boness2006_bill_logs --no-gif
+```
+
+Choose another registered event by changing SAFOD_EVENT_KEY. The forward
+run is not needed just to update P/S overlays. --overwrite explicitly
+replaces an existing forward package; retain the intended --nt when rerunning
+(default 12000 steps). The full comparison needs PyKonal and EikoHypoTomo,
+installed in geo, while the forward model runs in fwi.
+
 Predicted P/S now use native Zhang 2009 3-D eikonal times for real data,
 switching to original Lin 2010 Vp/Vs on Zhang coverage errors,
 and the saved forward model's 2-D eikonal times for synthetics. The new
 `--arrivals-only` mode computes curves without filtering or rerunning the
 elastic solver. Geometry, numerical checks, commands and output conventions
 are documented in [travel_times.md](travel_times.md).
+
+Ordinary comparison output is the existing compare/dc<theta>/<model>/
+directory, including prediction CSV/JSON and the usual PNGs. No separate
+eikonal_3d directory is created. The configured 0-20 Hz comparison filter
+is implemented as a 20 Hz low-pass; positive lower corners retain bandpass
+behaviour.
 
 - `--initial-model` has different defaults: `run_forward` uses
   `bill_logs`, `compare_event` uses `hybrid_zhang2009_boness2006_bill_logs`

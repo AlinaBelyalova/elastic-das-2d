@@ -32,7 +32,7 @@ def bandpass_traces(
     order: int = 4,
     taper_frac: float = 0.05,
 ) -> np.ndarray:
-    """Apply a zero-phase Butterworth bandpass along the time axis."""
+    """Apply a zero-phase Butterworth filter; fmin=0 selects a low-pass."""
     array = _as_trace_matrix(data, caller="bandpass_traces")
 
     if not np.isfinite(fs_hz) or fs_hz <= 0.0:
@@ -45,9 +45,9 @@ def bandpass_traces(
         )
 
     nyquist_hz = 0.5 * fs_hz
-    if not 0.0 < fmin_hz < fmax_hz < nyquist_hz:
+    if not 0.0 <= fmin_hz < fmax_hz < nyquist_hz:
         raise ValueError(
-            "Require 0 < fmin < fmax < Nyquist; "
+            "Require 0 <= fmin < fmax < Nyquist; "
             f"received {fmin_hz}, {fmax_hz}, {nyquist_hz} Hz."
         )
 
@@ -62,13 +62,16 @@ def bandpass_traces(
         taper[-n_taper:] = ramp[n_taper:]
         filtered_input = filtered_input * taper[None, :]
 
-    sos = butter(
-        order,
-        [fmin_hz, fmax_hz],
-        btype="bandpass",
-        fs=fs_hz,
-        output="sos",
-    )
+    if fmin_hz == 0.0:
+        sos = butter(order, fmax_hz, btype="lowpass", fs=fs_hz, output="sos")
+    else:
+        sos = butter(
+            order,
+            [fmin_hz, fmax_hz],
+            btype="bandpass",
+            fs=fs_hz,
+            output="sos",
+        )
     return sosfiltfilt(sos, filtered_input, axis=1)
 
 

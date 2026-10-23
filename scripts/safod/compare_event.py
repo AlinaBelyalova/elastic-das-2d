@@ -975,7 +975,7 @@ def main() -> None:
     out_dir = args.output_dir or comparison_dir_for_model(
         args.theta_deg,
         args.initial_model,
-    ) / "eikonal_3d"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("\nComparison inputs")
