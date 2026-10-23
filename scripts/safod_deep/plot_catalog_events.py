@@ -49,7 +49,8 @@ import DASutils  # noqa: E402
 from src.safod.models import build_initial_model  # noqa: E402
 from src.safod.models.zhang2009 import DEFAULT_ZHANG_SECTION  # noqa: E402
 from src.safod.travel_times import (  # noqa: E402
-    Zhang3D, add_travel_time_arguments, prediction_options, require_backend,
+    Regional3D, add_travel_time_arguments, prediction_options, require_backend,
+    regional_model_from_args,
 )
 
 DEFAULT_CATALOG = Path("results/safod_deep/catalog/catalog_recorded.csv")
@@ -79,7 +80,7 @@ DEFAULT_PCLIP = 96.0
 DEFAULT_DPI = 180
 MAX_DISPLAY_FS_HZ = 500.0
 
-# The default is native Zhang 2009 3-D eikonal through EikoHypoTomo.
+# The default is Zhang 2009, then original Lin 2010 on coverage errors only.
 # The following 2-D hybrid and straight-ray options are explicit legacy modes;
 # they are never automatic fallbacks from the 3-D mode.
 EIKO_HYPO_TOMO_ROOT = Path(
@@ -189,7 +190,7 @@ class PhaseGuideContext:
     geometry: PhaseGuideGeometry
     eikonal_models: tuple[EikonalPhaseModel, ...]
     eikonal_error: str | None = None
-    zhang_3d: Zhang3D | None = None
+    zhang_3d: Regional3D | None = None
     failures: dict = field(default_factory=dict)
 
 
@@ -505,7 +506,7 @@ def prepare_phase_guide_context(
         require_backend(args.eiko_root, 3)
         return PhaseGuideContext(
             geometry=geometry, eikonal_models=(),
-            zhang_3d=Zhang3D(args.phase_native_grid),
+            zhang_3d=regional_model_from_args(args),
         )
     models: list[EikonalPhaseModel] = []
     errors: list[str] = []
@@ -859,14 +860,14 @@ def choose_phase_travel_time_guide(
             return PhaseTravelTimeGuide(
                 fibre_distance_m=fibre, p_time_s=p, s_time_s=s,
                 method=details["method"], model_name=details["model_name"],
-                model_label="Zhang 2009 3-D", source_x_m=source_x, source_z_m=source_z,
-                grid_dx_m=args.phase_3d_spacing_m, grid_dz_m=args.phase_3d_spacing_m,
+                model_label=details["model_label"], source_x_m=source_x, source_z_m=source_z,
+                grid_dx_m=details["spacing_m"], grid_dz_m=details["spacing_m"],
                 details=details,
                 source_y_m=source_y,
             )
         except Exception as exc:
-            # Keep the observed DAS plot, but never replace a failed 3-D
-            # prediction by a different physical model.
+            # Regional3D handles coverage-only model selection. A missing
+            # backend, invalid model, node limit, or solver error stays visible.
             context.failures[event_id] = f"{type(exc).__name__}: {exc}"
             print(f"P/S prediction unavailable for {event_id}: {context.failures[event_id]}")
             return None
@@ -2817,10 +2818,9 @@ def process_event(
                 "source_x_m": float(travel_time_guide.source_x_m),
                 "source_z_m": float(travel_time_guide.source_z_m),
                 "source_y_m": finite_float(travel_time_guide.source_y_m),
-                "source_coordinate_frame": (
-                    "Zhang native XYZ; metres; z is MSL-referenced depth"
-                    if travel_time_guide.model_name == "zhang2009_native_3d"
-                    else "SAFOD profile XZ; metres; z is depth below local ground"
+                "source_coordinate_frame": travel_time_guide.details.get(
+                    "source_coordinate_frame",
+                    "SAFOD profile XZ; metres; z is depth below local ground",
                 ),
                 "grid_dx_m": finite_float(travel_time_guide.grid_dx_m),
                 "grid_dz_m": finite_float(travel_time_guide.grid_dz_m),
@@ -3857,7 +3857,7 @@ def parse_args() -> argparse.Namespace:
         choices=["3d", "auto", "eikonal", "straight", "none"],
         default="3d",
         help=(
-            "Default 3d: native Zhang 2009 with EikoHypoTomo, no fallback. "
+            "Default 3d: Zhang 2009, then original Lin 2010 outside Zhang coverage. "
             "auto/eikonal/straight retain explicit legacy modes."
         ),
     )

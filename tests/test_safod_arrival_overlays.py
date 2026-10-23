@@ -9,14 +9,15 @@ from scripts.safod import compare_event as comparison
 
 
 @pytest.mark.parametrize("envelope", [False, True])
-def test_distinct_guides_and_no_double_source_time_shift(tmp_path, monkeypatch, envelope):
+@pytest.mark.parametrize("real_model", ["Zhang 2009 3-D eikonal", "Lin 2010 3-D (original Vp/Vs) eikonal"])
+def test_distinct_guides_and_no_double_source_time_shift(tmp_path, monkeypatch, envelope, real_model):
     channels = np.array([210., 220., 230.])
     times = np.linspace(-0.2, 1.2, 80)
     data = np.zeros((3, 80))
     p2, s2 = np.full(3, 0.3), np.full(3, 0.6)
     p3, s3 = np.full(3, 0.4), np.full(3, 0.8)
     real = dict(arrival_channels=channels, p_arrivals_s=p3, s_arrivals_s=s3,
-                model_label="Zhang 2009 3-D eikonal")
+                model_label=real_model)
     captured = []
     original_close = plt.close
     monkeypatch.setattr(plt, "close", lambda fig: captured.append(fig))
@@ -37,6 +38,8 @@ def test_distinct_guides_and_no_double_source_time_shift(tmp_path, monkeypatch, 
         for ax, expected, label in ((fig.axes[0], p3, "3-D"), (fig.axes[1], p2, "2-D")):
             line = next(line for line in ax.lines if line.get_label().startswith("Predicted P"))
             assert label in line.get_label()
+            if ax is fig.axes[0]:
+                assert real_model in line.get_label()
             np.testing.assert_array_equal(line.get_ydata(), expected)
     finally:
         for fig in captured:

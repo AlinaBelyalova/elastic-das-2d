@@ -134,6 +134,7 @@ is solved separately: `plot_catalog_events --prepare-geometry` (part B).
 ### run_forward and compare_event
 
 Predicted P/S now use native Zhang 2009 3-D eikonal times for real data,
+switching to original Lin 2010 Vp/Vs on Zhang coverage errors,
 and the saved forward model's 2-D eikonal times for synthetics. The new
 `--arrivals-only` mode computes curves without filtering or rerunning the
 elastic solver. Geometry, numerical checks, commands and output conventions
@@ -239,7 +240,7 @@ $FWI -m scripts.safod_deep.build_event_catalog \
   (`--fmin`, `--fmax`, `--phase-guide-mode`, `--phase-model`, `--event-id`,
   `--geometry-class`, `--limit`, `--output-dir` etc., see `--help`).
   The default is `--phase-guide-mode 3d`: native Zhang 2009 through
-  EikoHypoTomo, with no automatic fallback. The previous hybrid model
+  EikoHypoTomo, then original Lin 2010 only on coverage errors. The previous hybrid model
   remains available in explicitly selected legacy modes. See
   [travel_times.md](travel_times.md) for pilot checks and regeneration.
 - For the folders `event_qc_1_20Hz/`, `event_qc_3_15Hz/`, `event_qc_5_30Hz/`

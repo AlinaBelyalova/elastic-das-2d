@@ -30,7 +30,7 @@ from scripts.safod.settings import (
 from src.common.signal_processing import bandpass_traces, median_welch_psd
 from src.safod.models import AVAILABLE_INITIAL_MODELS
 from src.safod.travel_times import (
-    Zhang3D, add_travel_time_arguments, prediction_options,
+    add_travel_time_arguments, prediction_options, regional_model_from_args,
     receivers_from_channels, solve_eikonal,
 )
 
@@ -613,7 +613,7 @@ def plot_real_with_arrivals(
 
     ax.set_title(
         f"{event_id} real DAS with predicted arrivals\n"
-        "Zhang 2009 3-D eikonal"
+        f"{real_arrivals['model_label']}"
     )
     ax.set_xlabel("Physical reference channel")
     ax.set_ylabel("Time from catalog origin [s]")
@@ -872,7 +872,7 @@ def predict_comparison_arrivals(real, synthetic, args, out_dir):
     """Independent predictions for the real 3-D geometry and saved 2-D model."""
     channels = np.asarray(real["raw_channels"], dtype=float)
     lat, lon, tvd = receivers_from_channels(GEOMETRY_CSV, channels)
-    model3 = Zhang3D(args.phase_native_grid)
+    model3 = regional_model_from_args(args)
     p3, s3, metadata3 = model3.predict(
         source_lat=float(get_scalar(real, "ev_lat")),
         source_lon=float(get_scalar(real, "ev_lon")),
@@ -897,10 +897,17 @@ def predict_comparison_arrivals(real, synthetic, args, out_dir):
                      source_xz_m=source2.tolist(), time_reference="source origin; no STF shift")
     order = np.argsort(channels)
     real_arrivals = dict(arrival_channels=channels[order], p_arrivals_s=p3[order],
-                         s_arrivals_s=s3[order], model_label="Zhang 2009 3-D eikonal")
+                         s_arrivals_s=s3[order], model_label=metadata3["model_label"] + " eikonal")
     receiver_x, receiver_y = model3.coordinates.xy_m(lat, lon)
+    # Retain the existing Zhang-coordinate CSV columns with their actual
+    # meaning; Lin EN coordinates get separate, explicitly named columns.
+    if model3.primary is not None:
+        zhang_x, zhang_y = model3.primary.coordinates.xy_m(lat, lon)
+    else:
+        zhang_x = zhang_y = np.full(channels.shape, np.nan)
     pd.DataFrame(dict(channel=channels, latitude=lat, longitude=lon, tvd_m=tvd,
-                      zhang_x_m=receiver_x, zhang_y_m=receiver_y,
+                      zhang_x_m=zhang_x, zhang_y_m=zhang_y,
+                      receiver_model_x_m=receiver_x, receiver_model_y_m=receiver_y,
                       depth_msl_m=tvd-SAFOD_SURFACE_ELEVATION_M,
                       p_time_s=p3, s_time_s=s3)).to_csv(
         out_dir / "predicted_arrivals_real_3d.csv", index=False
@@ -912,7 +919,8 @@ def predict_comparison_arrivals(real, synthetic, args, out_dir):
     (out_dir / "predicted_arrivals_metadata.json").write_text(
         json.dumps(provenance, indent=2), encoding="utf-8"
     )
-    print("Real guides: Zhang 2009 3-D eikonal; synthetic guides: matching model 2-D eikonal")
+    print(f"Real guides: {metadata3['model_label']} eikonal; "
+          "synthetic guides: matching model 2-D eikonal")
     return real_arrivals, p2, s2, provenance
 
 

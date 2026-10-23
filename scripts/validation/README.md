@@ -1,5 +1,11 @@
 # Solver checks
 
+Original Lin source/receiver coverage can be checked without DAS/FMM using
+`python -m scripts.validation.safod.lin2010_coverage` in `geo` or `fwi`.
+It validates the recorded catalogue and full physical borehole geometry;
+the model inputs, independent original Vp/Vs, local FMM checks and pilot
+commands are in [the travel-time runbook](../../docs/safod/travel_times.md).
+
 In short: one table of all checks from `scripts/validation/{sbp_sat,elastic,fwi}`,
 the example in `scripts/examples` and the benchmarks in `scripts/benchmarks`:
 what each checks, how long it runs, when it counts as passed and where it

@@ -3,8 +3,9 @@
 A static site for viewing events of the SAFOD-deep archive: map, catalog and DAS QC plots.
 Built from `results/safod_deep/`; the normal command is `update_event_explorer` (below), publishing is in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-P/S guides now default to native Zhang 2009 3-D eikonal predictions through
-EikoHypoTomo. The configured gallery is `event_qc_3d_eikonal/`; existing
+P/S guides default to Zhang 2009 3-D, then original Lin 2010 Vp/Vs outside
+Zhang coverage; both use EikoHypoTomo. Labels identify the chosen model.
+The configured gallery is `event_qc_3d_eikonal/`; existing
 images are not recomputed by the site builder. Validate and regenerate the
 gallery first: [travel-time runbook](../docs/safod/travel_times.md).
 

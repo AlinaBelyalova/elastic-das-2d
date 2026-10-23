@@ -3,7 +3,8 @@
 Native Zhang files store velocity as [z, y, x] in km/s. EikoHypoTomo's
 3-D interface expects [component, y, x, z] in a single consistent unit
 system and source/receiver columns [x, y, z]. We use SI throughout.
-These are first-arrival predictions, not waveform picks.
+These are first-arrival predictions, not waveform picks. Regional3D selects
+the original Lin 2010 fields on a Zhang coverage error only.
 """
 from __future__ import annotations
 
@@ -27,7 +28,9 @@ DEFAULT_NATIVE_GRID = Path(
 )
 DEFAULT_EIKO_ROOT = Path("/home/groups/ettore88/alina/packages/EikoHypoTomo")
 DEFAULT_CACHE = Path("results/safod/travel_times_3d")
-CACHE_SCHEMA = 1
+DEFAULT_LIN_VP = Path("data/safod/velocity_models/lin2010/raw/out.vp")
+DEFAULT_LIN_VS = Path("data/safod/velocity_models/lin2010/raw/out.vs")
+CACHE_SCHEMA = 2
 
 
 class CoverageError(ValueError):
@@ -192,6 +195,22 @@ class ZhangCoordinates:
 class Zhang3D:
     """Physical Zhang tomography; no artificial bounding nodes or lateral extrapolation."""
 
+    model_name = "zhang2009_native_3d"
+    model_label = "Zhang 2009 3-D"
+    coordinate_frame = "Zhang native XYZ; metres; z is MSL-referenced depth"
+    top_extension = "constant top-node velocity up to local ground"
+
+    def _top_bound(self, ground):
+        return ground
+
+    def _model_metadata(self):
+        return {"zhang_coordinates": self.coordinates.__dict__}
+
+    def _sample_slab(self, interpolator, x, yz):
+        query = np.column_stack((np.full(len(yz), x), yz))
+        query[:, 2] = np.maximum(query[:, 2], self.axes[2][0])
+        return interpolator(query)
+
     def __init__(self, path=DEFAULT_NATIVE_GRID):
         self.path = Path(path)
         self.sha256 = file_sha256(self.path)
@@ -247,10 +266,10 @@ class Zhang3D:
         ground = -float(surface_elevation_m)
         axes = []
         for i, native in enumerate(self.axes):
-            low = ground if i == 2 else float(native[0])
+            low = self._top_bound(ground) if i == 2 else float(native[0])
             high = float(native[-1])
             if np.min(points[:, i]) < low or np.max(points[:, i]) >= high:
-                raise CoverageError(f"Geometry outside physical Zhang axis {i}: [{low}, {high}) m.")
+                raise CoverageError(f"Geometry outside physical {self.model_label} axis {i}: [{low}, {high}) m.")
             start = max(low, float(np.floor((np.min(points[:, i]) - pad) / h) * h))
             # Ending below the physical edge never extrapolates tomography.
             end = min(high, float(np.ceil((np.max(points[:, i]) + pad) / h) * h))
@@ -266,7 +285,8 @@ class Zhang3D:
         if nodes > max_nodes:
             raise ValueError(f"3-D grid {shape} has {nodes:,} nodes, exceeding --phase-max-nodes={max_nodes:,}.")
         metadata = {
-            "schema": CACHE_SCHEMA, "model_name": "zhang2009_native_3d",
+            "schema": CACHE_SCHEMA, "model_name": self.model_name,
+            "model_label": self.model_label, "source_coordinate_frame": self.coordinate_frame,
             "model_path": str(self.path), "model_sha256": self.sha256,
             "method": "3-D eikonal FMM (EikoHypoTomo/pykonal)",
             "source_xyz_m": source.tolist(), "spacing_m": h, "padding_m": pad,
@@ -274,11 +294,11 @@ class Zhang3D:
             "n_receivers": len(receivers),
             "surface_elevation_m": float(surface_elevation_m),
             "vertical_datum": "depth below MSL, positive down; receiver z=TVD-surface_elevation",
-            "top_extension": "constant top-node velocity up to local ground",
+            "top_extension": self.top_extension,
             "native_top_depth_m": float(self.axes[2][0]),
             "grid_shape_xyz": list(shape), "grid_bounds_xyz_m": [[float(a[0]), float(a[-1])] for a in axes],
             "estimated_working_memory_bytes": nodes * 160,
-            "zhang_coordinates": self.coordinates.__dict__,
+            **self._model_metadata(),
         }
         digest = hashlib.sha256(json.dumps(metadata, sort_keys=True).encode())
         digest.update(receivers.tobytes())
@@ -296,7 +316,7 @@ class Zhang3D:
             if p.shape != (len(receivers),) or s.shape != p.shape or not np.all(np.isfinite([p, s])):
                 raise RuntimeError(f"Invalid travel-time cache: {cache}")
             return p, s, stored
-        print(f"Zhang 3-D grid {shape}, h={h:g} m, bounds={metadata['grid_bounds_xyz_m']}; "
+        print(f"{self.model_label} grid {shape}, h={h:g} m, bounds={metadata['grid_bounds_xyz_m']}; "
               f"estimated working memory {nodes * 160 / 2**30:.2f} GiB")
         times = []
         yz = np.stack(np.meshgrid(axes[1], axes[2], indexing="ij"), axis=-1).reshape(-1, 2)
@@ -304,9 +324,7 @@ class Zhang3D:
         for interpolator in self.interpolators:
             velocity = np.empty(shape, dtype=np.float64)
             for ix, x in enumerate(axes[0]):
-                query = np.column_stack((np.full(len(yz), x), yz))
-                query[:, 2] = np.maximum(query[:, 2], self.axes[2][0])
-                velocity[ix] = interpolator(query).reshape(shape[1:])
+                velocity[ix] = self._sample_slab(interpolator, x, yz).reshape(shape[1:])
             tt, _ = solve_eikonal(velocity, axes, source, receivers, eiko_root=eiko_root)
             times.append(tt)
             del velocity
@@ -325,6 +343,13 @@ class Zhang3D:
 
 def add_travel_time_arguments(parser):
     parser.add_argument("--phase-native-grid", type=Path, default=DEFAULT_NATIVE_GRID)
+    parser.add_argument("--phase-lin-vp", type=Path, default=DEFAULT_LIN_VP)
+    parser.add_argument("--phase-lin-vs", type=Path, default=DEFAULT_LIN_VS)
+    parser.add_argument("--phase-lin-spacing-m", type=float, default=200.0,
+                        help="Lin fallback grid spacing; independent of the local Zhang grid.")
+    parser.add_argument("--phase-3d-model", choices=("zhang-lin", "zhang", "lin"),
+                        default="zhang-lin",
+                        help="Default: Zhang, then Lin only on a physical coverage error.")
     parser.add_argument("--eiko-root", type=Path, default=DEFAULT_EIKO_ROOT)
     parser.add_argument("--phase-cache-dir", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--phase-3d-spacing-m", type=float, default=100.0)
@@ -335,6 +360,60 @@ def add_travel_time_arguments(parser):
 def prediction_options(args):
     return dict(spacing_m=args.phase_3d_spacing_m, padding_m=args.phase_3d_padding_m,
                 max_nodes=args.phase_max_nodes, eiko_root=args.eiko_root, cache_dir=args.phase_cache_dir)
+
+
+class Regional3D:
+    """Select one complete 3-D model per event; never blend or hide solver errors."""
+
+    def __init__(self, *, native_grid=DEFAULT_NATIVE_GRID, lin_vp=DEFAULT_LIN_VP,
+                 lin_vs=DEFAULT_LIN_VS, mode="zhang-lin", lin_spacing_m=200.0):
+        if mode not in ("zhang-lin", "zhang", "lin"):
+            raise ValueError(f"Unknown 3-D model selection: {mode}")
+        if not np.isfinite(lin_spacing_m) or lin_spacing_m <= 0:
+            raise ValueError("Lin grid spacing must be finite and positive.")
+        self.mode = mode
+        self.lin_spacing_m = float(lin_spacing_m)
+        self.primary = None if mode == "lin" else Zhang3D(native_grid)
+        self.lin_paths = (lin_vp, lin_vs)
+        self._lin = None
+        self.selected_model = None
+
+    @property
+    def coordinates(self):
+        if self.selected_model is None:
+            raise RuntimeError("Coordinates require a successful prediction first.")
+        return self.selected_model.coordinates
+
+    def predict(self, **options):
+        reason = None
+        if self.primary is not None:
+            try:
+                p, s, metadata = self.primary.predict(**options)
+            except CoverageError as exc:
+                if self.mode == "zhang":
+                    raise
+                reason = str(exc)
+            else:
+                self.selected_model = self.primary
+                return p, s, dict(metadata, model_selection=self.mode,
+                                  fallback_used=False, fallback_reason=None)
+        if self._lin is None:
+            # Local import avoids a module cycle; parsing is done once per shard.
+            from src.safod.lin2010 import Lin3D
+            self._lin = Lin3D(*self.lin_paths)
+        lin_options = dict(options, spacing_m=self.lin_spacing_m)
+        if reason is not None:
+            print(f"Zhang coverage unavailable; using Lin 2010: {reason}")
+        p, s, metadata = self._lin.predict(**lin_options)
+        self.selected_model = self._lin
+        return p, s, dict(metadata, model_selection=self.mode,
+                          fallback_used=(reason is not None), fallback_reason=reason)
+
+
+def regional_model_from_args(args):
+    return Regional3D(native_grid=args.phase_native_grid,
+                      lin_vp=args.phase_lin_vp, lin_vs=args.phase_lin_vs,
+                      mode=args.phase_3d_model, lin_spacing_m=args.phase_lin_spacing_m)
 
 
 def receivers_from_channels(geometry_csv, channels):

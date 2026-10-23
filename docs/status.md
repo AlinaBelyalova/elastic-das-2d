@@ -1,6 +1,6 @@
 # Project status
 
-Date: 2026-10-16. Only the current stage, the latest verified runs,
+Date: 2026-10-22. Only the current stage, the latest verified runs,
 next steps and open questions are kept here. Where things are: [project map](project_map.md).
 
 ## Focus: SBP-SAT foundations
@@ -50,14 +50,15 @@ one at a time, with an adjoint operator check after each addition.
 
 ## Open questions
 
-Native Zhang 2009 3-D arrival predictions are implemented for the web
-gallery and real-data comparisons; synthetic panels use their matching
-2-D model. Independent local homogeneous-medium QC passed with the public
-EikoHypoTomo wrapper. Installed-backend compatibility, native-model
-registration, real-event grid/padding convergence, and regenerated website
-products still require verification on Sherlock. See
-[travel-time validation](safod/travel_times.md). No real-data or deployment
-success is implied by the local numerical QC.
+Zhang 2009 remains the first 3-D arrival model for observations; original
+separate Lin 2010 Vp/Vs are now selected only after a Zhang coverage error.
+Synthetic panels retain their matching 2-D model. Local original-Lin coverage
+passed for all 291 published sources and 2991 fibre horizontal points.
+Public-wrapper FMM passed at the wellhead/turnaround for a deep event,
+the deepest/distant event, and a negative-depth event. For nc75379216,
+200-to-100 m refinement differences were at most 1.785 ms P / 2.619 ms S.
+The full-channel pilot and gallery regeneration with the new code still
+require Sherlock. See [travel-time validation](safod/travel_times.md).
 
 1. **Event 2026-10-03: v3 or v5.** For nc75443276 there are two versions of
    the DAS vs MH030 comparison: `plot_oct03_m08_das_mh030_pb_v3.py` (zero phase,

@@ -3,11 +3,12 @@
 These are model-based first-arrival guides, not waveform picks or ground-truth
 labels. The website and real-data panel of `compare_event` share
 `src/safod/travel_times.py`: native Zhang, Thurber & Bedrosian (2009) 3-D Vp
-and Vs through EikoHypoTomo/PyKonal. The synthetic panel uses a separate 2-D
+and Vs, switching to the original separate Lin et al. (2010) fields only on
+a Zhang coverage error. Both use EikoHypoTomo/PyKonal. The synthetic panel uses a separate 2-D
 eikonal calculation on the exact Vp/Vs arrays saved in its forward NPZ.
 The elastic solver remains 2-D.
 
-## Coordinates and model support
+## Zhang coordinates and model support
 
 - Input: `data/safod/velocity_models/zhang_thurber_bedrosian_2009/processed/zhang2009_native_grid.npz`.
   Prepare it with `scripts.safod.velocity_models.zhang2009.parse_model` if
@@ -43,6 +44,101 @@ straight-ray prediction.
 The default grid limit is 12,000,000 nodes. Bounds, shape and a rough
 working-memory estimate (160 bytes/node, excluding DAS and other processes)
 are printed. Velocity interpolation processes one x slab at a time.
+
+## Original Lin 2010 regional alternative
+
+Default selection is `--phase-3d-model zhang-lin`: keep Zhang when it covers
+the source and receivers; use one complete Lin model for both P and S after
+`CoverageError`. This does not blend fields. Solver failures, node limits,
+missing files, invalid data and backend errors do not trigger model switching.
+Use `--phase-3d-model zhang` to reproduce a Zhang-only run, or `lin` to test
+Lin explicitly without requiring a Zhang file.
+
+Inputs, excluded from Git:
+
+- `data/safod/velocity_models/lin2010/raw/out.vp`
+- `data/safod/velocity_models/lin2010/raw/out.vs`
+
+Override them with `--phase-lin-vp` / `--phase-lin-vs`. These are the author's
+original seven-column files, from the
+[model page](https://sites.google.com/view/guoqing-lin/products/ca_statewide).
+Citation: Lin et al. (2010), BSSA 100, 225-240,
+[doi:10.1785/0120090028](https://doi.org/10.1785/0120090028).
+The current SCEC uwlinca distribution derives Vs empirically from Vp and
+is not interchangeable with this original separate out.vs.
+
+`src/safod/lin2010.py` validates complete unique native grids and positive
+finite velocities. Native shapes [z,y,x] are (9,133,61) for Vp and (9,45,21)
+for Vs. Both have depth nodes -1,1,4,8,14,20,27,35,45 km below MSL;
+horizontal nodes are 10 km and 30 km apart respectively.
+
+For interpolation, invert the published geographic quadrilaterals bilinearly
+to locate each point on its native x/y grid. Interpolate each original field
+trilinearly there. This avoids inventing an undocumented author projection.
+Geographic coordinates have 0.0001 degree file precision. Only fractional-cell
+roundoff within 1e-10 of an edge is rounded to the edge (3 micrometres for
+30 km nodes); outside geographic cells and native depths fail explicitly.
+
+For propagation, use a local WGS84 azimuthal-equidistant east/north frame
+centred at the existing SAFOD wellhead (35.9742039 N, -120.5521414 E).
+Its x/y coordinates are metres; depth remains positive down below MSL.
+Uniform Cartesian FMM in this local frame neglects Earth curvature over
+these local/regional paths. Geographic lookup and SI conversion are performed
+before FMM; native x/y labels are not treated as physical EN coordinates.
+
+Lin uses its original top node at -1 km MSL, with no top extrapolation.
+An above-sea-level catalogue source retains its original depth, including
+the source at -0.67 km; it is not moved to SAFOD's local ground elevation.
+`source_above_local_flat_ground` records that case. This preserves catalogue
+geometry but does not supply terrain, a free surface or an improved hypocentre.
+The receiver convention remains z=TVD-660.46 m.
+
+Lin defaults to `--phase-lin-spacing-m 200` and uses the same requested
+padding as Zhang (3000 m by default). This independent numerical spacing
+keeps regional volumes below the existing 12-million-node limit; it does not
+increase the original model's resolution. The entire used volume must have
+Vp > Vs. One distant native Vp node near 33.15 N, -115.56 E fails this
+comparison against interpolated native Vs; its count is recorded, and any
+used volume containing an inconsistency fails rather than changing values.
+
+Metadata and labels identify the selected model, both original file hashes,
+coordinate frame, actual grid spacing and reason for switching. Cache schema
+2 includes those model/coordinate changes; schema-1 predictions are retained
+on disk but are not reused. Real comparison CSVs retain their Zhang-coordinate
+columns and add receiver_model_x_m / receiver_model_y_m; in explicit Lin-only
+mode the unavailable Zhang-coordinate columns are NaN.
+
+### Verify on Sherlock before regenerating the gallery
+
+```bash
+GEO=/home/groups/ettore88/alina/.envs/geo/bin/python
+$GEO -m scripts.validation.safod.lin2010_coverage \
+  --output-dir results/validation/safod/lin2010_coverage_sherlock
+$GEO -m scripts.safod_deep.plot_catalog_events \
+  --event-id 75379216 --phase-guide-mode 3d \
+  --output-dir results/safod_deep/event_qc_lin_pilot
+```
+
+The coverage check reads the actual physical borehole geometry and recorded
+catalogue, without DAS or FMM. Inspect the pilot PNG and metadata: model_name
+must be lin2010_original_vp_vs_3d, fallback_used true, and fallback_reason a
+Zhang coverage error. A companion image must actually exist.
+
+Local patch verification used original files (SHA256 Vp
+f2043b320a473ea4c078fa0487cdf9c54563fcd534ef5d5eeed7a4069a37102c,
+Vs cafc52c4f83e9fab6606990eb4f0432c5eb9e5584feeb52736b8e26afe869f93),
+291 published source coordinates and 2991 published fibre horizontal points.
+All were covered; padded 200 m domains also lay within both geographic grids.
+The largest regional domain was (131,255,111), 3,707,955 nodes, approximately
+0.55 GiB at the shared 160-byte/node estimate.
+
+Numerical FMM pilots used the public workshop wrapper and PyKonal 0.4.1,
+with the exact published wellhead and turnaround receiver positions only.
+For nc75379216, refinement 200 to 100 m changed predictions by at most
+1.785 ms P and 2.619 ms S; padding 3 to 6 km at 200 m changed them by less
+than 1e-6 ms. Deep/distant nc75414397 (17.98 km) and negative-depth
+nc75387326 (-0.67 km) also solved with finite P/S and S after P.
+This does not replace a full-channel Sherlock pilot or validate observed onsets.
 
 ## External backend and cache
 
@@ -141,7 +237,7 @@ After pilot validation and gallery generation, follow the
 [web runbook](../../web_safod/README.md) to build the site. Source changes
 alone neither regenerate plots nor publish the website.
 
-A missing backend fails before reading DAS. An unsupported event or a
+A missing backend fails before reading DAS. An event outside both models or a
 failed solve retains its observed DAS plot without a P/S companion. The
 reason is printed and saved as `travel_time_guide_error`; the shard summary
 counts missing guides. Explicit `auto`, `eikonal`, and `straight` retain

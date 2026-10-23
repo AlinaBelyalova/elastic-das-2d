@@ -69,7 +69,7 @@ does not write them.
 | --- | --- | --- |
 | `safod_deep/catalog/` | `scan_nano_manifest`, `build_event_catalog`; `focal_mechanisms.json` — `web_safod.scripts.fetch_focal_mechanisms` | recording manifests, NCEDC catalog, overview figures, `CATALOG_NOTES.md`; there is no source script in the project for `recording_manifest_pre_nano.csv` |
 | `safod_deep/geometry/` | `plot_catalog_events --prepare-geometry` | `acquisition_registration.json` and a QC figure: registration of recording configurations to the physical cable geometry. There is no source script in the project for `nano_mapping.csv` and `nano_registration.*` (check with the author) |
-| `safod_deep/event_qc_3d_eikonal/` | `plot_catalog_events`, `plot_catalog_events_array.sbatch` | new event QC gallery and `metadata/`, native Zhang 2009 3-D eikonal guides; current `web_safod` input |
+| `safod_deep/event_qc_3d_eikonal/` | `plot_catalog_events`, `plot_catalog_events_array.sbatch` | event QC gallery and `metadata/`, Zhang 2009 or original Lin 2010 3-D eikonal guides; current `web_safod` input |
 | `safod_deep/event_qc/` | earlier `plot_catalog_events` runs | retained gallery with the earlier travel-time methods |
 | `safod/travel_times_3d/` | shared travel-time module | cached 3-D P/S predictions, geometry and provenance; [runbook](../docs/safod/travel_times.md) |
 | `safod_deep/event_qc_1_20Hz/`, `event_qc_3_15Hz/`, `event_qc_5_30Hz/`, `event_qc_adaptive/` | earlier runs (August 2026) | earlier gallery variants; `web_safod` does not read them |
