@@ -2582,6 +2582,7 @@ def plot_event(
 
     # Companion render with the exact same DAS background and time window.
     if travel_time_guide is not None and arrivals_output_path is not None:
+        display_model_label = travel_time_guide.model_label.removesuffix(" (original Vp/Vs)")
         phase_kind = (
             "eikonal"
             if "eikonal" in travel_time_guide.method.lower()
@@ -2593,7 +2594,7 @@ def plot_event(
             color="#00d5ff",
             lw=1.8,
             ls="-",
-            label=f"P {phase_kind} — {travel_time_guide.model_label}",
+            label=f"P {phase_kind} — {display_model_label}",
             zorder=5,
         )
         ax.plot(
@@ -2602,14 +2603,13 @@ def plot_event(
             color="#7CFC00",
             lw=1.8,
             ls="--",
-            label=f"S {phase_kind} — {travel_time_guide.model_label}",
+            label=f"S {phase_kind} — {display_model_label}",
             zorder=5,
         )
         annotation.set_text(
             base_annotation
             + "\n"
-            + f"P/S guides: {travel_time_guide.model_label}\n"
-            + f"method: {travel_time_guide.method}"
+            + f"P/S guides: {display_model_label}"
         )
         ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
         fig.savefig(
