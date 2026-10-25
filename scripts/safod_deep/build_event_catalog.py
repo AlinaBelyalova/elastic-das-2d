@@ -13,7 +13,7 @@
 # python -m scripts.safod_deep.build_event_catalog \
 #   --roots-config config/safod_deep/roots.json \
 #   --geometry /path/to/SAFOD_Phase2_GeoReferenced_Channels.xlsx \
-#   --wellhead-elevation-m 684.0
+#   --wellhead-elevation-m 660.5
 #
 # Do not guess wellhead elevation. Omit the option if the geometry file already
 # contains absolute cable elevation; otherwise 3-D distances are marked unknown.
@@ -36,6 +36,10 @@ datadir.set_data_dir(
     Path(sys.prefix) / "share" / "proj"
 )
 
+from src.safod.reference import (
+    SAFOD_WELLHEAD_LAT_WGS84,
+    SAFOD_WELLHEAD_LON_WGS84,
+)
 from src.safod_deep.catalog import (
     CableGeometry3D,
     H5RecordingScanner,
@@ -79,8 +83,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=10.0,
         help=(
-            "Exclude shallow reference-spool geometry from the best-fit "
-            "vertical cable plane. Set a negative value to disable filtering."
+            "Exclude shallow cable points from distance calculations only. "
+            "The wellhead and profile use the complete geometry. "
+            "Set a negative value to disable filtering."
         ),
     )
     parser.add_argument(
@@ -91,12 +96,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--wellhead-latitude",
         type=float,
-        default=35.97243650644933,
+        default=SAFOD_WELLHEAD_LAT_WGS84,
     )
     parser.add_argument(
         "--wellhead-longitude",
         type=float,
-        default=-120.5511469244454,
+        default=SAFOD_WELLHEAD_LON_WGS84,
     )
     parser.add_argument(
         "--max-radius-km",
@@ -242,6 +247,7 @@ def main() -> None:
         args.geometry,
         wellhead_elevation_m=args.wellhead_elevation_m,
         sheet_name=_parse_sheet(args.geometry_sheet),
+        profile_origin=(SAFOD_WELLHEAD_LAT_WGS84, SAFOD_WELLHEAD_LON_WGS84),
         min_tvd_m=(
             None
             if args.geometry_min_tvd_m < 0.0

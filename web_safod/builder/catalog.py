@@ -8,6 +8,8 @@ from typing import Any
 
 import pandas as pd
 
+from src.safod_deep.plot_provenance import require_current_plot_labels
+
 
 REQUIRED_COLUMNS = {
     "event_id",
@@ -150,6 +152,8 @@ def event_record_from_row(
     plots: list[dict[str, Any]],
     event_page_template: str,
 ) -> dict[str, Any]:
+    for metadata in metadata_rows:
+        require_current_plot_labels(metadata, row)
     raw_event_id = safe_event_id(row["event_id"])
     event_id = canonical_public_event_id(raw_event_id)
     origin = pd.Timestamp(row["origin_time_utc"])

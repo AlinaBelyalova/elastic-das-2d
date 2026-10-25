@@ -37,18 +37,15 @@ GEO_XLSX = Path(
 # SAFOD GEODETIC / VERTICAL REFERENCE
 # ==============================================================================
 
-# Canonical project SAFOD wellhead coordinate.
-SAFOD_WELLHEAD_LAT_WGS84 = 35.9742039
-SAFOD_WELLHEAD_LON_WGS84 = -120.5521414
-
-# Same project reference point as supplied in NAD27 / UTM zone 10N.
-SAFOD_WELLHEAD_UTM_NAD27_E_M = 720807.06
-SAFOD_WELLHEAD_UTM_NAD27_N_M = 3983663.97
-SAFOD_WELLHEAD_UTM_NAD27_EPSG = 26710
-
-# Ground elevation used by the flat-surface 2-D solver.
-# Solver z=0 is local SAFOD ground surface; z is positive downward.
-SAFOD_SURFACE_ELEVATION_M = 660.46
+# Re-export the event-independent reference for existing callers.
+from src.safod.reference import (
+    SAFOD_WELLHEAD_LAT_WGS84,
+    SAFOD_WELLHEAD_LON_WGS84,
+    SAFOD_WELLHEAD_UTM_NAD27_E_M,
+    SAFOD_WELLHEAD_UTM_NAD27_N_M,
+    SAFOD_WELLHEAD_UTM_NAD27_EPSG,
+    SAFOD_SURFACE_ELEVATION_M,
+)
 
 # Undamped scientific model extent in the canonical along-profile coordinate.
 # Absorbing layers are appended outside these bounds by run_forward.py.

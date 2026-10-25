@@ -53,6 +53,12 @@ from src.safod.travel_times import (  # noqa: E402
     regional_model_from_args,
 )
 
+from src.safod_deep.plot_provenance import require_current_plot_labels
+from src.safod.reference import (
+    SAFOD_WELLHEAD_LAT_WGS84, SAFOD_WELLHEAD_LON_WGS84,
+    SAFOD_SURFACE_ELEVATION_M,
+)
+
 DEFAULT_CATALOG = Path("results/safod_deep/catalog/catalog_recorded.csv")
 DEFAULT_MANIFEST = Path("results/safod_deep/catalog/recording_manifest.csv")
 DEFAULT_OUTPUT_DIR = Path("results/safod_deep/event_qc_3d_eikonal")
@@ -61,13 +67,6 @@ GEO_XLSX = Path(
     "/home/groups/ettore88/alina/SAFOD/SAFOD_Phase2_GeoReferenced_Channels.xlsx"
 )
 
-# Keep these pure geometry/datum constants local instead of importing
-# scripts.safod.settings: that module resolves the currently configured HDF5
-# event at import time and would couple the catalogue plotter to one event.
-# Values must stay synchronized with scripts/safod/settings.py.
-SAFOD_WELLHEAD_LAT_WGS84 = 35.9742039
-SAFOD_WELLHEAD_LON_WGS84 = -120.5521414
-SAFOD_SURFACE_ELEVATION_M = 660.46
 SAFOD_SCIENTIFIC_X_MIN_M = -1500.0
 SAFOD_SCIENTIFIC_X_MAX_M = 3500.0
 
@@ -2681,6 +2680,7 @@ def process_event(
                 "Existing plot has different P/S provenance. Use a new --output-dir "
                 "or explicitly request --overwrite."
             )
+        require_current_plot_labels(record, event_row)
         record["status"] = "exists"
         record["elapsed_s"] = 0.0
         return record
@@ -2930,9 +2930,10 @@ def build_html_gallery(
             ).name
 
             if image_name:
-                metadata[
-                    image_name
-                ] = row
+                metadata[image_name] = row
+            arrivals_name = Path(str(row.get("arrivals_image_path") or "")).name
+            if arrivals_name:
+                metadata[arrivals_name] = row
 
     pngs = sorted(
         output_dir.glob(
@@ -2964,6 +2965,9 @@ def build_html_gallery(
                 event_id
             )
         )
+
+        if row and catalog_row is not None:
+            require_current_plot_labels(row, catalog_row)
 
         def fallback(
             key: str,

@@ -34,6 +34,8 @@ import numpy as np
 import pandas as pd
 from pyproj import Transformer
 
+from src.safod.reference import SAFOD_WELLHEAD_UTM_NAD27_EPSG
+
 
 UTC = timezone.utc
 NCEDC_EVENT_URL = "https://service.ncedc.org/fdsnws/event/1/query"
@@ -931,10 +933,14 @@ class CableGeometry3D:
     Physical SAFOD cable geometry in UTM coordinates and an absolute vertical
     datum.
 
+    The authoritative SAFOD workbook stores Easting/Northing in NAD27 / UTM
+    zone 10N (EPSG:26710). Convert event coordinates into that same CRS before
+    subtracting positions. WGS84 / UTM 10N (EPSG:32610) is a different datum.
+
     The modelling section is the SAME vertical profile used by
     scripts.safod.prepare_event:
 
-      - origin: shallowest cable point / wellhead;
+      - origin: supplied canonical WGS84 wellhead (or shallowest cable point);
       - horizontal direction: wellhead to the median deepest down-leg cable;
       - along/cross coordinates: local east/north tangent-plane projection.
 
@@ -999,10 +1005,14 @@ class CableGeometry3D:
         *,
         wellhead_elevation_m: float | None,
         source_epsg: int = 4326,
-        utm_epsg: int = 32610,
+        utm_epsg: int = SAFOD_WELLHEAD_UTM_NAD27_EPSG,
+        min_tvd_m: float | None = None,
+        profile_origin: tuple[float, float] | None = None,
     ) -> None:
         self.frame = frame.copy().reset_index(drop=True)
         self.source_epsg = int(source_epsg)
+        # The cable's stored Easting/Northing are already in this CRS; only
+        # source positions are transformed. Do not treat NAD27 as WGS84 UTM.
         self.utm_epsg = int(utm_epsg)
         self.transformer = Transformer.from_crs(
             f"EPSG:{self.source_epsg}",
@@ -1158,21 +1168,26 @@ class CableGeometry3D:
             else np.nan
         )
 
-        # Match scripts.safod.prepare_event exactly: local tangent-plane EN
-        # coordinates around the wellhead.
+        # Define the profile using the complete down-leg, before distance-only
+        # shallow filtering. The builder supplies the canonical WGS84 origin
+        # used by prepare_event; standalone geometries default to their wellhead.
+        self.profile_latitude, self.profile_longitude = (
+            profile_origin if profile_origin is not None
+            else (self.wellhead_latitude, self.wellhead_longitude)
+        )
         earth_radius_m = 6371000.0
-        lat0_rad = np.deg2rad(self.wellhead_latitude)
+        lat0_rad = np.deg2rad(self.profile_latitude)
 
         local_east = (
             np.deg2rad(
-                self.longitude_valid - self.wellhead_longitude
+                self.longitude_valid - self.profile_longitude
             )
             * earth_radius_m
             * np.cos(lat0_rad)
         )
         local_north = (
             np.deg2rad(
-                self.latitude_valid - self.wellhead_latitude
+                self.latitude_valid - self.profile_latitude
             )
             * earth_radius_m
         )
@@ -1251,8 +1266,8 @@ class CableGeometry3D:
         self.along_m = local_en @ self.along_unit
         self.cross_m = local_en @ self.cross_unit
 
-        # Retain these names for compatibility with existing code, but the
-        # section origin is now the physical wellhead and cross-plane offset 0.
+        # Projected physical wellhead retained for overview-plot compatibility.
+        # Tangent-plane calculations use profile_latitude/profile_longitude.
         self.xy_origin = np.array(
             [
                 self.wellhead_east,
@@ -1262,6 +1277,18 @@ class CableGeometry3D:
         )
         self.cross_plane_m = 0.0
 
+        # Filter only the cable used in distance calculations. Neither the
+        # physical wellhead nor the full down-leg profile may move with this cut.
+        if min_tvd_m is not None and np.any(np.isfinite(self.tvd_valid)):
+            keep = self.tvd_valid >= float(min_tvd_m)
+            if np.count_nonzero(keep) < 2:
+                raise ValueError("TVD filter leaves fewer than two cable points.")
+            self.valid[np.flatnonzero(self.valid)[~keep]] = False
+            for name in ("east_valid", "north_valid", "latitude_valid",
+                         "longitude_valid", "channel_valid", "md_valid",
+                         "tvd_valid", "elevation_valid", "along_m", "cross_m"):
+                setattr(self, name, getattr(self, name)[keep])
+
     @classmethod
     def from_file(
         cls,
@@ -1270,6 +1297,7 @@ class CableGeometry3D:
         wellhead_elevation_m: float | None,
         sheet_name: str | int | None = 0,
         min_tvd_m: float | None = 10.0,
+        profile_origin: tuple[float, float] | None = None,
     ) -> "CableGeometry3D":
         path = Path(path)
         suffix = path.suffix.lower()
@@ -1283,25 +1311,11 @@ class CableGeometry3D:
                 f"Unsupported geometry format {suffix!r}; use Excel or CSV."
             )
 
-        if min_tvd_m is not None:
-            tvd_col = _resolve_column(
-                frame.columns,
-                cls.TVD_ALIASES,
-                required=False,
-                label="TVD",
-            )
-            if tvd_col is not None:
-                tvd = pd.to_numeric(
-                    frame[tvd_col],
-                    errors="coerce",
-                )
-                keep = tvd >= float(min_tvd_m)
-                if np.count_nonzero(keep) >= 2:
-                    frame = frame.loc[keep].reset_index(drop=True)
-
         return cls(
             frame,
             wellhead_elevation_m=wellhead_elevation_m,
+            min_tvd_m=min_tvd_m,
+            profile_origin=profile_origin,
         )
 
     def _source_coordinates(
@@ -1318,16 +1332,16 @@ class CableGeometry3D:
         earth_radius_m = 6371000.0
         local_east = (
             np.deg2rad(
-                float(longitude) - self.wellhead_longitude
+                float(longitude) - self.profile_longitude
             )
             * earth_radius_m
             * np.cos(
-                np.deg2rad(self.wellhead_latitude)
+                np.deg2rad(self.profile_latitude)
             )
         )
         local_north = (
             np.deg2rad(
-                float(latitude) - self.wellhead_latitude
+                float(latitude) - self.profile_latitude
             )
             * earth_radius_m
         )
@@ -1915,6 +1929,9 @@ def write_catalog_notes(
 
 ## Distance definitions
 
+- Horizontal source coordinates are transformed from `EPSG:{cable.source_epsg}`
+  to the cable's stored UTM CRS, `EPSG:{cable.utm_epsg}`. The authoritative
+  SAFOD workbook uses NAD27 / UTM zone 10N (`EPSG:26710`).
 - `wellhead_epicentral_distance_km`: horizontal source-to-wellhead distance.
 - `wellhead_hypocentral_distance_km`: 3-D source-to-wellhead distance.
 - `min_3d_distance_to_cable_km`: shortest distance from the hypocenter to the
@@ -1932,7 +1949,8 @@ Vertical datum status:
 
 2-D profile definition:
 
-- origin: physical wellhead / shallowest cable point;
+- WGS84 origin (lat, lon): `({cable.profile_latitude}, {cable.profile_longitude})`;
+- shallow filtering affects cable distances only, not the origin or direction;
 - horizontal unit vector EN:
   `({cable.along_unit[0]:.8f}, {cable.along_unit[1]:.8f})`;
 - direction: wellhead to median deepest down-leg cable;

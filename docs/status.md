@@ -1,6 +1,6 @@
 # Project status
 
-Date: 2026-10-22. Only the current stage, the latest verified runs,
+Date: 2026-10-24. Only the current stage, the latest verified runs,
 next steps and open questions are kept here. Where things are: [project map](project_map.md).
 
 ## Focus: SBP-SAT foundations
@@ -47,6 +47,18 @@ The immediate task is to secure the foundations with small independent checks:
 
 Absorbing boundaries, interpolation, DAS, acceleration and SAFOD are added
 one at a time, with an adjoint operator check after each addition.
+
+## SAFOD geometry correction
+
+The catalog now projects sources to NAD27 / UTM 10N (EPSG:26710), matching
+stored workbook coordinates. The wellhead and full down-leg profile are
+established before the distance-only shallow cut; the builder uses the same
+canonical WGS84 profile origin as prepare_event. NCEDC query defaults now
+use that wellhead as well. Pure reference constants are shared without
+importing event-specific settings. Catalog tools, local gallery and site
+builder reject PNG metadata with stale catalog labels and request an in-place
+rerender. The original workbook, MD/TVD, registration and 3-D P/S backend are
+unchanged. Rebuild commands and validation: [geometry correction](safod/geometry_correction.md).
 
 ## Open questions
 

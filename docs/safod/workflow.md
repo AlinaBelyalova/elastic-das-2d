@@ -256,12 +256,19 @@ $FWI -m scripts.safod_deep.build_event_catalog \
   `recording_manifest_nano.csv`. How the merge was done is not recorded in
   the code; check with the author before rebuilding the manifest.
 - `--wellhead-elevation-m` is needed if the geometry has TVD but no absolute
-  elevation; without it 3-D distances are marked unknown (script header:
-  "Do not guess wellhead elevation"). The example in the header uses
-  `684.0`, `settings.py` has `SAFOD_SURFACE_ELEVATION_M = 660.46`, and in the
-  current `catalog_recorded.csv`
-  `closest_cable_elevation_m + closest_cable_tvd_m` = 660.5 m in all 291
-  rows. Which value to use: check with the author.
+  elevation. Use **660.5 m MSL** to reproduce the existing recorded catalog.
+  This is the ground elevation confirmed by S. Hickman and the supplied
+  SAFOD geographic-coordinate document. Workbook MD/TVD are used as GL depths;
+  do not apply the older directional survey's 31 ft KB offset again.
+  The modelling surface remains 660.46 m, unchanged (4 cm rounding difference).
+- Workbook Easting/Northing are NAD27 / UTM 10N, EPSG:26710. Sources must be
+  transformed into that same CRS before measuring source-to-cable distances.
+- Query centre and modelling-profile origin use the canonical wellhead WGS84
+  35.9742039, -120.5521414. The complete down-leg defines the profile, exactly
+  as in prepare_event. The TVD cut only selects cable points for distances;
+  it must not move the wellhead or rotate the profile.
+- See [geometry correction](geometry_correction.md) for the in-place rebuild
+  sequence. Catalog changes do not update labels already rendered into PNGs.
 
 ### Stages 3–5: plot_catalog_events
 
