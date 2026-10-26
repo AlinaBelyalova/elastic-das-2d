@@ -261,6 +261,10 @@ $FWI -m scripts.safod_deep.build_event_catalog \
   SAFOD geographic-coordinate document. Workbook MD/TVD are used as GL depths;
   do not apply the older directional survey's 31 ft KB offset again.
   The modelling surface remains 660.46 m, unchanged (4 cm rounding difference).
+- The WGS84 -> NAD27 operation is now fixed, including two vendored NOAA grids
+  and their SHA256 hashes. This preserves the current Sherlock 2.15 m grid
+  route and removes environment-dependent Helmert/grid selection. Provenance:
+  `catalog/catalog_horizontal_transform.json`. See [geodesy lock](geodesy_lock.md).
 - Workbook Easting/Northing are NAD27 / UTM 10N, EPSG:26710. Sources must be
   transformed into that same CRS before measuring source-to-cable distances.
 - Query centre and modelling-profile origin use the canonical wellhead WGS84

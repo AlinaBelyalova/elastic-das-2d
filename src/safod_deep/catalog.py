@@ -35,6 +35,11 @@ import pandas as pd
 from pyproj import Transformer
 
 from src.safod.reference import SAFOD_WELLHEAD_UTM_NAD27_EPSG
+from src.safod.nad27 import (
+    make_transformer as make_safod_nad27_transformer,
+    provenance as safod_nad27_provenance,
+    require_source_coverage,
+)
 
 
 UTC = timezone.utc
@@ -1014,11 +1019,20 @@ class CableGeometry3D:
         # The cable's stored Easting/Northing are already in this CRS; only
         # source positions are transformed. Do not treat NAD27 as WGS84 UTM.
         self.utm_epsg = int(utm_epsg)
-        self.transformer = Transformer.from_crs(
-            f"EPSG:{self.source_epsg}",
-            f"EPSG:{self.utm_epsg}",
-            always_xy=True,
-        )
+        self._pinned_nad27 = self.source_epsg == 4326 and self.utm_epsg == 26710
+        if self._pinned_nad27:
+            self.transformer = make_safod_nad27_transformer()
+            self.horizontal_transform_provenance = safod_nad27_provenance()
+        else:
+            # Retain explicitly requested non-SAFOD CRS pairs for generic callers.
+            self.transformer = Transformer.from_crs(
+                f"EPSG:{self.source_epsg}", f"EPSG:{self.utm_epsg}", always_xy=True,
+            )
+            self.horizontal_transform_provenance = {
+                "id": "explicit_non_safod_crs_pair",
+                "source_crs": f"EPSG:{self.source_epsg}",
+                "target_crs": f"EPSG:{self.utm_epsg}",
+            }
 
         channel_col = _resolve_column(
             self.frame.columns,
@@ -1324,9 +1338,12 @@ class CableGeometry3D:
         latitude: float,
         depth_km: float,
     ) -> dict[str, float]:
+        if self._pinned_nad27:
+            require_source_coverage(float(longitude), float(latitude))
         east, north = self.transformer.transform(
             float(longitude),
             float(latitude),
+            errcheck=True,
         )
 
         earth_radius_m = 6371000.0
@@ -1926,6 +1943,15 @@ def write_catalog_notes(
 - Event origins covered by DAS data: `{recorded_count}`
 - Full requested waveform windows covered: `{window_count}`
 - Recorded events with `good` coplanar geometry: `{good_count}`
+
+## Horizontal transformation provenance
+
+```json
+{json.dumps(cable.horizontal_transform_provenance, indent=2)}
+```
+
+The SAFOD transformation is fixed to its stated operation and vendored NOAA
+grids. An EPSG pair alone does not fix the selected datum transformation.
 
 ## Distance definitions
 

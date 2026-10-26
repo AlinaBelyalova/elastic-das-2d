@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from pyproj import Transformer
+from src.safod.nad27 import make_transformer as make_safod_nad27_transformer
 
 from src.safod_deep.catalog import CableGeometry3D
 
@@ -12,7 +13,10 @@ def cable_frame(epsg=26710):
     fraction = np.linspace(0., 1., 21)
     east = 720807.06 + 600. * fraction
     north = 3983663.97 + 800. * fraction
-    lon, lat = Transformer.from_crs(epsg, 4326, always_xy=True).transform(east, north)
+    if epsg == 26710:
+        lon, lat = make_safod_nad27_transformer().transform(east, north, direction="INVERSE")
+    else:
+        lon, lat = Transformer.from_crs(epsg, 4326, always_xy=True).transform(east, north)
     return pd.DataFrame(dict(
         Channel=210 + np.arange(21), UTM_E_m=east, UTM_N_m=north,
         MD_m=3000. * fraction, TVD_m=2500. * fraction,
@@ -69,8 +73,8 @@ def test_shallow_cut_preserves_wellhead_and_full_profile(tmp_path):
     frame = cable_frame()
     # Curved shallow section makes percentile/direction changes detectable.
     frame.loc[1:3, 'UTM_E_m'] += 50.
-    lon, lat = Transformer.from_crs(26710, 4326, always_xy=True).transform(
-        frame.UTM_E_m.to_numpy(), frame.UTM_N_m.to_numpy())
+    lon, lat = make_safod_nad27_transformer().transform(
+        frame.UTM_E_m.to_numpy(), frame.UTM_N_m.to_numpy(), direction="INVERSE")
     frame['Lon_WGS84'], frame['Lat_WGS84'] = lon, lat
     path = tmp_path / 'geometry.csv'
     frame.to_csv(path, index=False)

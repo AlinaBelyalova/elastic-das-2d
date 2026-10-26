@@ -1,6 +1,6 @@
 # Project status
 
-Date: 2026-10-24. Only the current stage, the latest verified runs,
+Date: 2026-10-25. Only the current stage, the latest verified runs,
 next steps and open questions are kept here. Where things are: [project map](project_map.md).
 
 ## Focus: SBP-SAT foundations
@@ -47,6 +47,18 @@ The immediate task is to secure the foundations with small independent checks:
 
 Absorbing boundaries, interpolation, DAS, acceleration and SAFOD are added
 one at a time, with an adjoint operator check after each addition.
+
+## Reproducible horizontal datum transformation
+
+The default SAFOD catalog now fixes inverse EPSG:1750 + inverse EPSG:1241 +
+UTM 10N with two SHA256-verified, vendored public-domain NOAA grids. Automatic
+PROJ selection previously reproduced old events with a 7 m Helmert operation
+in one environment and a 2.15 m grid operation in another. The catalog builder
+writes `catalog_horizontal_transform.json` and includes the provenance in its
+notes. Missing/modified grids or sources outside the operation area fail
+explicitly. The fixed route reproduces the current Sherlock catalog; the
+workbook, depths, profile, channel registration and 3-D arrivals are unchanged.
+See [geodesy lock](safod/geodesy_lock.md) for numerical controls and limits.
 
 ## SAFOD geometry correction
 

@@ -35,12 +35,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from pyproj import Geod, Transformer
+from pyproj import Geod
+from src.safod.nad27 import make_transformer as make_safod_nad27_transformer
 
 from scripts.safod.settings import (
     SAFOD_WELLHEAD_UTM_NAD27_E_M,
     SAFOD_WELLHEAD_UTM_NAD27_N_M,
-    SAFOD_WELLHEAD_UTM_NAD27_EPSG,
 )
 
 
@@ -239,15 +239,9 @@ def main() -> None:
 
     # Convert the supplied SAFOD NAD27 / UTM zone 10N coordinate to WGS84.
     # EPSG:26710 = NAD27 / UTM zone 10N.
-    transformer = Transformer.from_crs(
-        f"EPSG:{SAFOD_WELLHEAD_UTM_NAD27_EPSG}",
-        "EPSG:4326",
-        always_xy=True,
-    )
-
+    transformer = make_safod_nad27_transformer()
     main_lon, main_lat = transformer.transform(
-        args.main_utm_e,
-        args.main_utm_n,
+        args.main_utm_e, args.main_utm_n, direction="INVERSE", errcheck=True,
     )
 
     (

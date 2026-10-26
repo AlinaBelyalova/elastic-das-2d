@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -293,6 +294,10 @@ def main() -> None:
         args.out_dir / "event_windows_for_plotting.csv",
     )
 
+    (args.out_dir / "catalog_horizontal_transform.json").write_text(
+        json.dumps(cable.horizontal_transform_provenance, indent=2) + "\n",
+        encoding="utf-8",
+    )
     plot_catalog_overview(
         catalog,
         cable,
