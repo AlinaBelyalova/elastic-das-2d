@@ -26,6 +26,7 @@ from scripts.safod.settings import (
     comparison_dir_for_theta,
     forward_package_for_theta,
     forward_run_tag,
+    FORWARD_BACKENDS,
 )
 from src.common.signal_processing import bandpass_traces, median_welch_psd
 from src.safod.models import AVAILABLE_INITIAL_MODELS
@@ -235,12 +236,13 @@ def nearest_geometry_channel_for_receivers(
 def synthetic_package_for_model(
     theta_deg: float,
     initial_model: str,
+    backend: str = "numba_fused",
 ) -> Path:
     """
     settings.forward_package_for_theta() still resolves the common theta folder.
     Insert the model-name directory below that folder.
     """
-    base = Path(forward_package_for_theta(theta_deg))
+    base = Path(forward_package_for_theta(theta_deg, backend))
 
     return (
         base.parent
@@ -252,9 +254,10 @@ def synthetic_package_for_model(
 def comparison_dir_for_model(
     theta_deg: float,
     initial_model: str,
+    backend: str = "numba_fused",
 ) -> Path:
     return (
-        Path(comparison_dir_for_theta(theta_deg))
+        Path(comparison_dir_for_theta(theta_deg, backend))
         / initial_model
     )
 
@@ -960,6 +963,7 @@ def predict_comparison_arrivals(real, args, out_dir):
         shared_reference=True, reference_csv="predicted_arrivals_real_3d.csv",
         overlay_panels=["real", "synthetic"],
         synthetic_waveform_model=args.initial_model, synthetic_waveform_dimension=2,
+        synthetic_waveform_backend=args.backend,
     )
     (out_dir / "predicted_arrivals_metadata.json").write_text(
         json.dumps(provenance, indent=2), encoding="utf-8"
@@ -992,6 +996,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--backend", choices=FORWARD_BACKENDS,
+                        default="numba_fused", help="Select the matching saved forward solver.")
     parser.add_argument("--arrivals-only", action="store_true",
                         help="Save shared 3-D predictions for real and synthetic panels without filtering waveforms.")
     add_travel_time_arguments(parser)
@@ -1008,18 +1014,20 @@ def main() -> None:
     if not 0.0 <= args.theta_deg < 90.0:
         raise ValueError("--theta-deg must satisfy 0 <= theta < 90.")
 
-    requested_run_tag = forward_run_tag(args.theta_deg)
+    requested_run_tag = forward_run_tag(args.theta_deg, args.backend)
 
     real_pkg = Path(REAL_EVENT_PACKAGE)
 
     syn_pkg = synthetic_package_for_model(
         args.theta_deg,
         args.initial_model,
+        args.backend,
     )
 
     out_dir = args.output_dir or comparison_dir_for_model(
         args.theta_deg,
         args.initial_model,
+        args.backend,
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1027,6 +1035,7 @@ def main() -> None:
     print("=================")
     print(f"requested theta : {args.theta_deg:.1f} deg")
     print(f"initial model   : {args.initial_model}")
+    print(f"solver backend  : {args.backend}")
     print(f"run tag         : {requested_run_tag}")
     print(f"real package    : {real_pkg}")
     print(f"synthetic pkg   : {syn_pkg}")
@@ -1046,6 +1055,10 @@ def main() -> None:
         syn_pkg,
         allow_pickle=True,
     ) as synthetic:
+
+        package_backend = str(get_scalar(synthetic, "solver_backend", "numba_fused"))
+        if package_backend != args.backend:
+            raise ValueError(f"Requested backend {args.backend!r} differs from saved {package_backend!r}.")
 
         # ---------------------------------------------------------------------
         # Identity
@@ -1423,6 +1436,7 @@ def main() -> None:
                     "initial_model": args.initial_model,
                     "model_type": model_type,
                     "run_tag": requested_run_tag,
+                    "solver_backend": package_backend,
                     "theta_deg": source_theta_deg,
                     "source_f0_hz": source_f0_hz,
                     "source_time_function_t0_s": source_time_function_t0_s,

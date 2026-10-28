@@ -34,8 +34,6 @@ signs are:
     top (left endpoint)    eta = +1
     bottom (right endpoint) eta = -1.
 
-No ghost nodes are used.
-
 Scope of this first branch
 --------------------------
 * fourth-order staggered interior derivatives;
@@ -43,19 +41,21 @@ Scope of this first branch
 * periodic x;
 * free-surface SAT at top and bottom;
 * second-order leapfrog time integration;
-* diagonal normal-stress point source;
-* native-grid point receivers;
+* three-component grid stress-rate source (optional four-node shear spread);
+* native-grid point receivers or off-grid finite-gauge DAS observations;
 * exact Euclidean discrete adjoint;
 * exact model gradient for log(Vp), log(Vs), rho fixed.
 
-Absorbing boundaries, arbitrary source interpolation, DAS observation physics,
-and Numba optimization are deliberately deferred until the SBP-SAT core passes
-its own forward/adjoint/Taylor validations.
+Absorbing boundaries, arbitrary source interpolation, physical earthquake-moment
+normalization and Numba optimization remain integration tasks. Full runs enforce
+a sufficient timestep bound; advance_one_step is a lower-level routine whose
+caller must certify dt before its time loop.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Sequence
 import numpy as np
 
@@ -64,21 +64,35 @@ from .operators import (
     periodic_D_M_to_N,
     periodic_D_N_to_M,
 )
+from .boundaries import traction_free_sat, traction_free_sat_transpose
+from .observations import DASObservation
+from .stability import require_stable_timestep
 
 
 @dataclass(frozen=True)
 class StressPointSource:
     """
-    Scalar source time function injected into sxx/szz on the N-N stress grid.
+    Scalar stress-rate time function centred on one N-N grid node.
 
     At each integer-stress update:
         sxx[ix, iz] += dt * mxx * stf[it]
         szz[ix, iz] += dt * mzz * stf[it]
+
+    An optional mxz component is spread equally to the four surrounding M-M
+    shear nodes. All coefficients times stf have units Pa/s; these are NOT
+    automatically a physical earthquake moment or a spatial delta density.
     """
     ix: int
     iz: int
     mxx: float = 1.0
     mzz: float = 1.0
+    mxz: float = 0.0
+
+    def __post_init__(self) -> None:
+        _require_index(self.ix, "source ix")
+        _require_index(self.iz, "source iz")
+        if not all(np.isfinite(v) for v in (self.mxx, self.mzz, self.mxz)):
+            raise ValueError("Source stress-rate coefficients must be finite.")
 
 
 @dataclass(frozen=True)
@@ -91,6 +105,13 @@ class PointReceiver:
     def __post_init__(self) -> None:
         if self.component not in ("vx", "vz"):
             raise ValueError("component must be 'vx' or 'vz'.")
+        _require_index(self.ix, "receiver ix")
+        _require_index(self.iz, "receiver iz")
+
+
+def _require_index(value, name):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ValueError(f"{name} must be an integer grid index.")
 
 
 @dataclass(frozen=True)
@@ -260,6 +281,14 @@ def _check_ops(model: SBPSATModel2D, op_z: StaggeredSBP1D) -> None:
         )
 
 
+def _validate_state(state: SBPSATState, model: SBPSATModel2D) -> None:
+    for name in ("vx", "vz", "sxx", "szz", "sxz"):
+        field = getattr(state, name)
+        shape = (model.nx, model.nz_M if name in ("vz", "sxz") else model.nz_N)
+        if field.shape != shape or not np.isfinite(field).all():
+            raise ValueError(f"Initial {name} must be finite with native shape {shape}.")
+
+
 def _Dz_M_to_N(f: np.ndarray, op_z: StaggeredSBP1D) -> np.ndarray:
     return f @ op_z.D_M_to_N.T
 
@@ -297,24 +326,9 @@ def velocity_rhs(
         + _Dz_N_to_M(state.szz, op_z)
     )
 
-    # Tangential traction sxz lives on the staggered M_z grid. Project it to
-    # each boundary, then inject the SAT into boundary-aligned vx rows.
-    t_x_top = state.sxz @ op_z.p_left
-    t_x_bottom = state.sxz @ op_z.p_right
-
-    fx[:, 0] += t_x_top / op_z.H_N[0]
-    fx[:, -1] -= t_x_bottom / op_z.H_N[-1]
-
-    # Normal traction szz already lives on boundary-aligned N_z points. The
-    # SAT is injected into the staggered vz grid through H_M^{-1} p.
-    fz += (
-        state.szz[:, 0, None]
-        * (op_z.p_left / op_z.H_M)[None, :]
-    )
-    fz -= (
-        state.szz[:, -1, None]
-        * (op_z.p_right / op_z.H_M)[None, :]
-    )
+    sat_x, sat_z = traction_free_sat(state.sxz, state.szz, op_z)
+    fx += sat_x
+    fz += sat_z
 
     return fx / model.rho_vx, fz / model.rho_vz
 
@@ -343,14 +357,44 @@ def stress_rhs(
 def _validate_source(source: StressPointSource, model: SBPSATModel2D) -> None:
     if not (0 <= source.ix < model.nx and 0 <= source.iz < model.nz_N):
         raise ValueError("source index is outside the N-N stress grid.")
+    if source.mxz != 0 and not 1 <= source.iz < model.nz_M:
+        raise ValueError(
+            "A shear source needs four surrounding M-M nodes: 1 <= iz < nz_M."
+        )
+
+
+def _inject_source(sxx, szz, sxz, source, dt, amplitude):
+    sxx[source.ix, source.iz] += dt * amplitude * source.mxx
+    szz[source.ix, source.iz] += dt * amplitude * source.mzz
+    if source.mxz != 0:
+        for ix in ((source.ix - 1) % sxz.shape[0], source.ix):
+            for iz in (source.iz - 1, source.iz):
+                sxz[ix, iz] += 0.25 * dt * amplitude * source.mxz
+
+
+def _source_transpose(sxx, szz, sxz, source, dt):
+    result = (
+        source.mxx * sxx[source.ix, source.iz]
+        + source.mzz * szz[source.ix, source.iz]
+    )
+    if source.mxz != 0:
+        for ix in ((source.ix - 1) % sxz.shape[0], source.ix):
+            for iz in (source.iz - 1, source.iz):
+                result += 0.25 * source.mxz * sxz[ix, iz]
+    return dt * result
 
 
 def _validate_receivers(
-    receivers: Sequence[PointReceiver],
+    receivers: Sequence[PointReceiver] | DASObservation,
     model: SBPSATModel2D,
+    op_z: StaggeredSBP1D,
+    dx: float,
 ) -> None:
     if len(receivers) == 0:
         raise ValueError("At least one receiver is required.")
+    if isinstance(receivers, DASObservation):
+        receivers.validate_grid(model, op_z, dx)
+        return
     for rec in receivers:
         nz = model.nz_N if rec.component == "vx" else model.nz_M
         if not (0 <= rec.ix < model.nx and 0 <= rec.iz < nz):
@@ -360,8 +404,10 @@ def _validate_receivers(
 def sample_receivers(
     vx: np.ndarray,
     vz: np.ndarray,
-    receivers: Sequence[PointReceiver],
+    receivers: Sequence[PointReceiver] | DASObservation,
 ) -> np.ndarray:
+    if isinstance(receivers, DASObservation):
+        return receivers.sample(vx, vz)
     out = np.empty(len(receivers), dtype=np.float64)
     for ir, rec in enumerate(receivers):
         if rec.component == "vx":
@@ -373,10 +419,13 @@ def sample_receivers(
 
 def scatter_receivers_adjoint(
     q: np.ndarray,
-    receivers: Sequence[PointReceiver],
+    receivers: Sequence[PointReceiver] | DASObservation,
     adj_vx: np.ndarray,
     adj_vz: np.ndarray,
 ) -> None:
+    if isinstance(receivers, DASObservation):
+        receivers.scatter(q, adj_vx, adj_vz)
+        return
     for ir, rec in enumerate(receivers):
         if rec.component == "vx":
             adj_vx[rec.ix, rec.iz] += q[ir]
@@ -404,8 +453,8 @@ def advance_one_step(
 
     SATs are already part of the velocity RHS. There are no ghost fills.
     """
-    if dt <= 0.0 or dx <= 0.0:
-        raise ValueError("dx and dt must be positive.")
+    if not np.isfinite(dt) or not np.isfinite(dx) or dt <= 0.0 or dx <= 0.0:
+        raise ValueError("dx and dt must be finite and positive.")
 
     vx = state.vx.copy()
     vz = state.vz.copy()
@@ -424,12 +473,9 @@ def advance_one_step(
 
     if source is not None:
         _validate_source(source, model)
-        sxx[source.ix, source.iz] += (
-            dt * float(source_amplitude) * float(source.mxx)
-        )
-        szz[source.ix, source.iz] += (
-            dt * float(source_amplitude) * float(source.mzz)
-        )
+        if not np.isfinite(source_amplitude):
+            raise ValueError("Source amplitude must be finite.")
+        _inject_source(sxx, szz, sxz, source, dt, float(source_amplitude))
 
     return SBPSATState(vx=vx, vz=vz, sxx=sxx, szz=szz, sxz=sxz)
 
@@ -441,20 +487,26 @@ def run_forward(
     dx: float,
     dt: float,
     source: StressPointSource,
-    receivers: Sequence[PointReceiver],
+    receivers: Sequence[PointReceiver] | DASObservation,
     *,
     store_velocity_history: bool = False,
     initial_state: SBPSATState | None = None,
 ) -> ForwardResult:
-    """Run the controlled SBP-SAT forward source-to-receiver operator."""
+    """Run the controlled source-to-point or source-to-DAS operator.
+
+    Data are velocity at native point receivers, or axial strain rate when
+    receivers is a DASObservation. Sample n is at (n+1/2)*dt in either case.
+    """
     stf = np.asarray(stf, dtype=np.float64)
-    if stf.ndim != 1 or stf.size < 1:
-        raise ValueError("stf must be a nonempty 1-D array.")
+    if stf.ndim != 1 or stf.size < 1 or not np.isfinite(stf).all():
+        raise ValueError("stf must be a nonempty finite 1-D array.")
     _check_ops(model, op_z)
     _validate_source(source, model)
-    _validate_receivers(receivers, model)
+    _validate_receivers(receivers, model, op_z, dx)
+    require_stable_timestep(model, op_z, dx, dt)
 
     state = zero_state(model) if initial_state is None else initial_state.copy()
+    _validate_state(state, model)
     data = np.zeros((len(receivers), stf.size), dtype=np.float64)
     history: list[tuple[np.ndarray, np.ndarray]] | None
     history = [] if store_velocity_history else None
@@ -478,12 +530,7 @@ def run_forward(
         szz_new = state.szz + dt * dszz
         sxz_new = state.sxz + dt * dsxz
 
-        sxx_new[source.ix, source.iz] += (
-            dt * stf[it] * source.mxx
-        )
-        szz_new[source.ix, source.iz] += (
-            dt * stf[it] * source.mzz
-        )
+        _inject_source(sxx_new, szz_new, sxz_new, source, dt, stf[it])
 
         state = SBPSATState(
             vx=vx_new,
@@ -567,22 +614,15 @@ def _velocity_update_transpose(
 
     # sxz -> vx via Dz(M->N), plus its top/bottom traction SATs.
     adj_sxz = qx @ op_z.D_M_to_N
-    adj_sxz += np.outer(
-        qx[:, 0] / op_z.H_N[0],
-        op_z.p_left,
-    )
-    adj_sxz -= np.outer(
-        qx[:, -1] / op_z.H_N[-1],
-        op_z.p_right,
-    )
 
     # sxz -> vz via periodic Dx(M->N).
     adj_sxz += -periodic_D_N_to_M(qz, dx)
 
     # szz -> vz via Dz(N->M), plus normal-traction SATs.
     adj_szz = qz @ op_z.D_N_to_M
-    adj_szz[:, 0] += qz @ (op_z.p_left / op_z.H_M)
-    adj_szz[:, -1] -= qz @ (op_z.p_right / op_z.H_M)
+    sat_sxz, sat_szz = traction_free_sat_transpose(qx, qz, op_z)
+    adj_sxz += sat_sxz
+    adj_szz += sat_szz
 
     return adj_sxx, adj_szz, adj_sxz
 
@@ -594,7 +634,7 @@ def run_adjoint_to_source(
     dx: float,
     dt: float,
     source: StressPointSource,
-    receivers: Sequence[PointReceiver],
+    receivers: Sequence[PointReceiver] | DASObservation,
 ) -> np.ndarray:
     """
     Apply the exact Euclidean transpose of run_forward to receiver-space data.
@@ -606,6 +646,12 @@ def run_adjoint_to_source(
         raise ValueError("q_data must have shape (n_receivers, nt).")
     if q_data.shape[0] != len(receivers):
         raise ValueError("q_data receiver dimension does not match receivers.")
+    if q_data.shape[1] < 1 or not np.isfinite(q_data).all():
+        raise ValueError("q_data must have nonempty time axis and finite values.")
+    _check_ops(model, op_z)
+    _validate_source(source, model)
+    _validate_receivers(receivers, model, op_z, dx)
+    require_stable_timestep(model, op_z, dx, dt)
 
     nt = q_data.shape[1]
 
@@ -619,10 +665,7 @@ def run_adjoint_to_source(
 
     for it in range(nt - 1, -1, -1):
         # Forward source injection is the last stress-state operation.
-        grad_stf[it] = dt * (
-            source.mxx * adj_sxx[source.ix, source.iz]
-            + source.mzz * adj_szz[source.ix, source.iz]
-        )
+        grad_stf[it] = _source_transpose(adj_sxx, adj_szz, adj_sxz, source, dt)
 
         # Reverse stress update. sigma identity means adj_s* remain carried.
         add_vx, add_vz = _stress_update_transpose(
@@ -661,7 +704,7 @@ def objective_and_gradient_log_vp_vs(
     dx: float,
     dt: float,
     source: StressPointSource,
-    receivers: Sequence[PointReceiver],
+    receivers: Sequence[PointReceiver] | DASObservation,
 ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute J and exact discrete gradients for log(Vp), log(Vs), rho fixed.
@@ -678,7 +721,10 @@ def objective_and_gradient_log_vp_vs(
     where A is the four-cell arithmetic staggered average.  The gradient uses
     A^T exactly.
     """
+    stf = np.asarray(stf, dtype=np.float64)
     observed = np.asarray(observed, dtype=np.float64)
+    if not np.isfinite(observed).all():
+        raise ValueError("observed data must be finite.")
 
     fwd = run_forward(
         stf,

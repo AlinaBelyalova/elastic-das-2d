@@ -55,6 +55,8 @@ def main() -> None:
         config,
         overwrite_images=args.overwrite_images,
     )
+    for warning in report.get("warnings", []):
+        print("BUILD WARNING:", warning)
     site_dir = resolve_path(config, "site_dir")
     errors = validate_site(site_dir)
     if errors:
@@ -66,6 +68,11 @@ def main() -> None:
     print("---------------")
     print(f"events          : {report['events']}")
     print(f"plots available : {report['plots_available']}")
+    print(f"geophone pairs  : {report['geophone_comparisons_available']}")
+    windows = report.get("geophone_display", {}).get("counts", {})
+    if windows:
+        print(f"trace windows   : 0–2 s={windows.get('near_2s', 0)}, "
+              f"P/S={windows.get('arrivals', 0)}, original={windows.get('original', 0)}")
     print(f"site            : {site_dir}")
     print("validation      : PASSED")
 

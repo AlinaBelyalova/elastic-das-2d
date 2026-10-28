@@ -139,6 +139,7 @@
         <div id="updatedText"></div>
         <div id="plotCountText"></div>
         <div id="focalCountText"></div>
+        <div id="geophoneCountText"></div>
       </section>
     </aside>
 
@@ -174,6 +175,10 @@
       </div>
 
       <div class="plot-toolbar">
+        <button id="geophoneToggle" type="button" class="button secondary"
+                aria-expanded="false" aria-controls="geophonePanel">
+          Show geophone + DAS trace
+        </button>
         <button
           id="arrivalsToggle"
           type="button"
@@ -183,6 +188,22 @@
           Show P/S arrivals
         </button>
       </div>
+
+      <section id="geophonePanel" class="geophone-panel hidden" aria-label="Geophone and DAS comparison">
+        <h3>DAS axial strain rate + geophone acceleration</h3>
+        <p id="geophoneUnavailable" class="small-muted hidden" role="status">
+          No prepared geophone/DAS comparison is available for this event.
+        </p>
+        <label id="geophoneSelectorWrap" class="field hidden">
+          <span>Prepared DAS channel / station / band</span>
+          <select id="geophoneSelector"></select>
+        </label>
+        <p id="geophoneDetails" class="small-muted"></p>
+        <p id="geophoneWarning" class="geophone-warning hidden" role="status"></p>
+        <a id="geophoneImageLink" class="plot-link hidden" target="_blank" rel="noopener">
+          <img id="geophoneImage" alt="Geophone and DAS waveforms" loading="lazy">
+        </a>
+      </section>
 
       <div id="plotUnavailable" class="empty-plot hidden">
         DAS plot is not available for this event.

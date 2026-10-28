@@ -1,20 +1,109 @@
 # Project status
 
-Date: 2026-10-25. Only the current stage, the latest verified runs,
+Date: 2026-10-28. Only the current stage, the latest verified runs,
 next steps and open questions are kept here. Where things are: [project map](project_map.md).
 
-## Focus: SBP-SAT foundations
+## Focus: opt-in SBP-SAT backend in the SAFOD forward pipeline
 
 `src/sbp_sat/` is a separate NumPy prototype: periodic x, free top
-and bottom boundaries, point receivers, exact discrete adjoint and gradient with
-respect to log(Vp)/log(Vs) at fixed density. Connecting it to the production
-SAFOD/DAS workflow is a later stage. Formulas: [method.md](sbp_sat/method.md),
+and bottom boundaries, point or off-grid finite-gauge DAS receivers,
+exact discrete adjoint and gradient with
+respect to log(Vp)/log(Vs) at fixed density. This periodic reference is retained;
+the bounded backend below is connected to the SAFOD forward/DAS workflow.
+Formulas: [method.md](sbp_sat/method.md),
 checks and commands: [validation.md](sbp_sat/validation.md).
+
+The foundation/DAS integration now has isolated SAT and transpose functions,
+a conservative timestep certificate, optional shear stress-rate source and
+precomputed observation weights. The full source-to-DAS transpose and
+rho-fixed model gradient are checked. The existing centre-tangent DAS
+convention is preserved, including its curved-gauge approximation.
+Details and derivation: [integration.md](sbp_sat/integration.md).
+
+An additive bounded-domain reference now uses SBP pairs in both coordinates,
+a free top and local impedance SATs on the sides/bottom. Its trapezoidal
+velocity-boundary update has an exact modified-energy dissipation identity.
+The source-to-DAS transpose and model gradient include the implicit boundary
+solve and model-dependent impedances. It is first-order impedance absorption,
+not PML. Derivation and limits: [absorbing.md](sbp_sat/absorbing.md).
+
+`run_forward` and `compare_event` now accept `--backend sbp_sat`, with one
+stable solver directory and strict saved-backend checks. The adapter preserves
+the existing source tensor/STF and exact registered receivers, uses native
+SBP quadrature for off-grid stress-source normalization, and connects DAS,
+NPZ and native Vz snapshots/GIF. Numba is now the default SBP execution;
+CSR is retained as an independent reference with the same coefficients.
+A certified dt is selected before the STF, preserving requested duration.
+The same prepared source/DAS chain is available to source-adjoint and model
+gradient calls. Runbook and scope: [pipeline.md](sbp_sat/pipeline.md).
+Real-event SBP propagation and comparison have completed on Sherlock; the
+inputs remain external to this repository.
+
+The supplied Sherlock preflight passed on 1241x1121 nodes, dx=dz=5 m,
+dt=0.000157391363 s, nt=19062, 1196 valid DAS gauges and zero receiver
+coordinate mismatch. The initial CSR forward took 126.8 s for 1000 steps.
+That motivated the [compiled execution patch](sbp_sat/numba.md): fused
+float64 kernels, compact closures, owned workspace and native sampling,
+with no timestep or physical-convention change. User-supplied job 49903580
+completed with exit code 0: four threads, 7.68 s warmup, 88.3 s propagation
+versus 2435.1 s CSR (27.58x), 3 min 19 s whole batch including compare.
+The supplied image has additional crossing branches whose origin remains
+unresolved. A [frozen-material boundary control](sbp_sat/boundary_control.md)
+replays the exact saved reference and adds 600 m at the sides/bottom without
+changing the existing material volume, dt, source or DAS. The script is
+locally checked. The subsequent user-supplied control image shows that main
+crossing branches persist while differences concentrate in late time,
+approximately 1.6-2 s in the plotted scale. This is a qualitative image
+assessment; the full numeric control report has not been supplied.
+
+The bounded model-gradient adapter now defaults to exact uniform
+[checkpoint/replay](sbp_sat/checkpointing.md), retaining the original
+full-history option and shared reverse/VJP algebra. On the 1241x1121,
+nt=19062 event, history allocation is estimated at 9.073 GiB instead of
+394.818 GiB (84 complete checkpoints, interval 227). These exclude other
+process allocations. Small-model parity and Taylor checks pass locally;
+the actual event-size gradient and peak RSS have not been measured.
+The reverse/VJP still uses the independent matrix implementation.
+
+The subsequent Sherlock checkpoint report also passes all 178 SBP tests,
+with bitwise full-history parity and the same Taylor/finite-difference values.
+Wavefield/model rendering now shows the complete computational grid instead
+of the inner-window crop. `run_forward --render-only` can regenerate existing
+PNG/GIF from saved arrays with no propagation; it validates native axes/times
+and prints the written frame count. For the default event the displayed and
+computed bounds are x=-2100..4100 m, z=0..5600 m. Native Vz staggering is
+preserved. Numerical propagation and boundary absorption are unchanged.
+
+The subsequent boundary audit makes that grid explicit in SBP settings and
+removes the inner reference overlay. No extra cells are appended. The default
+actual domain stays x=-2100..4100 m, z=0..5600 m; legacy scientific-bound
+NPZ fields now alias the same actual domain. This is a layout/provenance fix,
+not an improved absorbing boundary.
+
+The current local impedance law was independently checked with continuum
+P/SV plane waves, including postcritical mode conversion and energy flux.
+For the illustrative Vp=5000, Vs=3000 m/s medium it reflects 19.6% of P energy
+and 35.4% of SV energy at 75 degrees from the normal. This is boundary-law
+error before discretization, not a measured SAFOD reflection coefficient.
+The previous normal-P packet test did not cover this limitation.
+Fresh manufactured-model checks reproduce the energy identity (relative
+balance error 2.19e-16), exact checkpoint parity and quadratic Taylor rates.
+These validate the current operator, not boundary transparency. The next
+gated work is an SBP-compatible CFS-PML on sides/bottom, then discrete
+reflection tests and its complete auxiliary-state adjoint/checkpoints.
+See [boundary_plan.md](sbp_sat/boundary_plan.md). No PML has been enabled.
 
 ## Latest verified runs
 
 | Run | Contents | Outcome |
 | --- | --- | --- |
+| `checkpoint_20261027` | authoring environment: 52 new checkpoint cases, all SBP tests, full-history parity, physical-source DAS/boundary Taylor and original pipeline QC | 178 SBP tests pass; checkpoint/full-history objective, data and gradients bitwise equal; Taylor slopes 2.001135/2.000568/2.000284; central difference relative error 1.12e-10; event history estimate 9.073 GiB without allocating event fields |
+| `numba065_median_20261027` | manufactured model at the full 1241x1121 pilot dimensions, 1200 receivers, three 100-step repeats; NumPy 2.0.1/Numba 0.65.1, Python 3.12 | local full suite 196 pass; CSR median 25.871 s, Numba 1/4/8 threads 2.183/1.410/1.690 s; 11.85x/18.34x/15.31x speedup; largest field difference 9.66e-16. Timings are not Sherlock event measurements |
+| `pipeline_20261027` | authoring environment: source/STF adapter, native CSR forward/DAS, complete source transpose, model gradient, SAFOD driver preflight/save/snapshots and comparison smoke with synthetic external inputs | 170 Python and 13 JS tests pass; quadrature source error 1.62e-16; dense/CSR difference 1.57e-15; source/DAS transpose 1.13e-14; Taylor slopes 2.00039--2.00009 |
+| Sherlock terminal report 2026-10-27, absorbing patch | user-supplied bounded-domain QC in fwi/Python 3.11 | 154 tests pass; energy-balance error 2.13e-16; transpose 3.57e-15; Taylor slopes 2.00208--2.00052; normal-P packet residual decreases from 1.92e-7 to 6.06e-10 |
+| `absorbing_20261027` | authoring environment: 28 new bounded-domain tests, full Python suite and absorbing/DAS QC | 154 Python tests pass; dissipation-balance error 2.19e-16; source/DAS transpose error 2.53e-15; Taylor slopes 2.0021--2.0005; normal-P residual energy 1.92e-7 at h=1 and 6.06e-10 at h=0.5 |
+| Sherlock terminal report 2026-10-27 | user-supplied run of the core patch in fwi/Python 3.11, without saved QC output | 126 tests pass; 24 pre-existing pyproj warnings; DAS transpose error 1.39e-16; Taylor slopes 1.9986--1.9996 |
+| `core_20261026`, `das_chain_20261026` | authoring environment: 43 new mathematical tests; the full Python suite; original operator, source transpose, Taylor, normal/oblique reflection and energy checks | 126 Python tests pass; all original QC pass; DAS dot-product error 1.67e-15, Taylor slopes 1.9986--1.9996; leapfrog energy drift 2.22e-16 |
 | [reference_v2](../results/validation/sbp_sat/reference_v2/validation_report.md) | results of the original QC v2 package (Python 3.12.14, NumPy 2.3.5): `oblique/`, `time_energy/`, `controls.json`, `sha256.json` | per the report, all 16 oblique cases and the fully discrete energy check passed; the control with the top SAT disabled fails, as it should |
 | [sherlock_20261016](../results/validation/sbp_sat/sherlock_20261016/validation_report.md) | local Sherlock diagnostics: `oblique/`, `time_energy/` | `passed = true` in both `summary.json` |
 
@@ -34,19 +123,22 @@ checks and commands: [validation.md](sbp_sat/validation.md).
 
 ## Next steps
 
-SBP-SAT already implements 2D forward, exact discrete adjoint and gradient.
-The immediate task is to secure the foundations with small independent checks:
+Polynomial/norm/trace checks, both 1-D flux cancellations and wrong-sign or
+disabled-SAT controls are now automated. SAT extraction preserves the original
+controlled solution and gradient to rounding error. Receiver interpolation
+and DAS are connected with a full transpose and Taylor test.
 
-1. Check 1D derivatives on polynomials, positivity of norms, projections
-   onto both boundaries and the SBP identity, including the minimum of 8 intervals.
-2. For `rho * vx_t = sxz_z`, `sxz_t = mu * vx_z`, derive the energy flux and
-   show that SAT cancels it. A wrong sign or disabled SAT must
-   be detected by the check.
-3. After that, split the responsibilities of `elastic2d.py`, comparing fields
-   before/after and preserving the accuracy of the energy, dot-product and Taylor checks.
-
-Absorbing boundaries, interpolation, DAS, acceleration and SAFOD are added
-one at a time, with an adjoint operator check after each addition.
+Bounded x/z and dissipative sides/bottom now have full transpose and model
+derivatives, including impedance derivatives. The normal-P absorption check
+is validated; practical oblique P/S reflection performance still needs its
+own benchmark because local impedance is not exact at oblique incidence.
+Source normalization/STF, off-grid source support, compiled execution and opt-in
+SAFOD forward/comparison are now connected and verified on manufactured
+inputs. The actual Sherlock event and compiled timing are now supplied;
+the boundary-control image is supplied and checkpoint/replay is implemented.
+Next compile and verify reverse/VJP before full-event gradient timing and
+a minimal FWI driver. Boundary receiver traces where needed remain follow-up work.
+The periodic-x/free-bottom model is not used as a production open domain.
 
 ## Reproducible horizontal datum transformation
 

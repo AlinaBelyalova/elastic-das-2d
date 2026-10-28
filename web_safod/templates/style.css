@@ -502,3 +502,8 @@ input[type="date"] {
   .metadata-grid { grid-template-columns: 1fr 1fr; }
   .dialog-footer { flex-direction: column; }
 }
+/* Prepared trace comparisons retain their own independent physical axes. */
+.geophone-panel { margin: 1rem 0; padding: 1rem; border: 1px solid #d6dce3; border-radius: 8px; background: #fff; }
+.geophone-panel h3 { margin-top: 0; }
+.geophone-panel img { display: block; width: 100%; height: auto; }
+.geophone-warning { padding: 0.6rem; border-left: 3px solid #b7791f; background: #fffbeb; color: #744210; }

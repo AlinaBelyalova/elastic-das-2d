@@ -47,10 +47,18 @@ from src.safod.reference import (
     SAFOD_SURFACE_ELEVATION_M,
 )
 
-# Undamped scientific model extent in the canonical along-profile coordinate.
-# Absorbing layers are appended outside these bounds by run_forward.py.
+# Inner model bounds in the canonical along-profile coordinate.
+# run_forward appends a material buffer. The legacy solver damps that buffer;
+# SBP uses ordinary material there and impedance SATs at the outer faces.
 SAFOD_SCIENTIFIC_X_MIN_M = -1500.0
 SAFOD_SCIENTIFIC_X_MAX_M = 3500.0
+
+# The SBP solver has ONE explicitly chosen domain. These are the actual
+# outer faces; run_forward does not append cells outside them. Keep the
+# current physical grid unchanged while removing the old implicit extension.
+SBP_X_MIN_M = -2100.0
+SBP_X_MAX_M = 4100.0
+SBP_Z_MAX_M = 5600.0  # flat free surface is z=0
 
 DAS_UTILITIES_ROOT = Path(
     "/home/groups/ettore88/alina/packages/DAS-utilities"
@@ -292,7 +300,21 @@ def format_theta_tag(theta_deg: float) -> str:
     return f"{theta_deg:05.1f}".replace(".", "p")
 
 
-def forward_run_tag(theta_deg: float) -> str:
+FORWARD_PADDING_CELLS = 120
+FORWARD_BACKENDS = ("numba_fused", "sbp_sat")
+
+
+def _check_forward_backend(backend: str) -> None:
+    if backend not in FORWARD_BACKENDS:
+        raise ValueError(f"Unknown SAFOD backend: {backend!r}.")
+
+
+def forward_run_tag(theta_deg: float, backend: str = "numba_fused") -> str:
+    _check_forward_backend(backend)
+    if backend == "sbp_sat":
+        # Historical file identity, retained so saved impedance runs remain
+        # readable. The literal pad120 is NOT used to build the SBP domain.
+        return f"sbp_sat_4_2_pad120_dc{format_theta_tag(theta_deg)}"
     return (
         f"{FORWARD_BASE_TAG}_dc"
         f"{format_theta_tag(theta_deg)}"
@@ -348,19 +370,23 @@ def theta_dir_name(theta_deg: float) -> str:
     return f"dc{theta_int:03d}"
 
 
-def forward_dir_for_theta(theta_deg: float) -> Path:
-    return FORWARD_EVENT_DIR / theta_dir_name(theta_deg)
+def forward_dir_for_theta(theta_deg: float, backend: str = "numba_fused") -> Path:
+    _check_forward_backend(backend)
+    root = FORWARD_EVENT_DIR if backend == "numba_fused" else FORWARD_EVENT_DIR / backend
+    return root / theta_dir_name(theta_deg)
 
 
-def forward_package_for_theta(theta_deg: float) -> Path:
+def forward_package_for_theta(theta_deg: float, backend: str = "numba_fused") -> Path:
     return (
-        forward_dir_for_theta(theta_deg)
+        forward_dir_for_theta(theta_deg, backend)
         / "outputs_safod_initial_forward.npz"
     )
 
 
-def comparison_dir_for_theta(theta_deg: float) -> Path:
-    return COMPARISON_EVENT_DIR / theta_dir_name(theta_deg)
+def comparison_dir_for_theta(theta_deg: float, backend: str = "numba_fused") -> Path:
+    _check_forward_backend(backend)
+    root = COMPARISON_EVENT_DIR if backend == "numba_fused" else COMPARISON_EVENT_DIR / backend
+    return root / theta_dir_name(theta_deg)
 
 
 # Compatibility names for older scripts.

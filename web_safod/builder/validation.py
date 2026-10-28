@@ -82,6 +82,34 @@ def validate_site(site_dir: Path) -> list[str]:
         if not isinstance(depth, (int, float)) or not math.isfinite(depth):
             errors.append(f"{event_id}: invalid depth_km={depth!r}")
 
+        comparisons = event.get("geophone_comparisons", [])
+        if not isinstance(comparisons, list):
+            errors.append(f"{event_id}: geophone_comparisons must be a list.")
+            comparisons = []
+        for comparison in comparisons:
+            if not isinstance(comparison, dict):
+                errors.append(f"{event_id}: comparison must be an object.")
+                continue
+            url = comparison.get("url", "")
+            path = Path(str(url))
+            if (not isinstance(url, str) or len(path.parts) != 2
+                    or path.parts[0] != "plots" or path.suffix != ".webp"):
+                errors.append(f"{event_id}: invalid comparison URL: {url!r}")
+            elif not (site_dir / path).is_file():
+                errors.append(f"{event_id}: comparison file does not exist: {url}")
+            if comparison.get("causal_filter") is not True or comparison.get("zero_phase") is not False:
+                errors.append(f"{event_id}: comparison must explicitly be causal and non-zero-phase.")
+            for key in ("channel", "channel_first", "channel_last", "fmin_hz", "fmax_hz",
+                        "fir_group_delay_s", "tmin_s", "tmax_s"):
+                value = comparison.get(key)
+                if key == "fir_group_delay_s" and key in comparison and value is None:
+                    continue  # Older products explicitly have an unknown filter delay.
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    errors.append(f"{event_id}: invalid comparison {key}={value!r}")
+            for key in ("seed_id", "metadata_seed_id", "filter_description"):
+                if not isinstance(comparison.get(key), str) or not comparison[key].strip():
+                    errors.append(f"{event_id}: missing comparison {key}.")
+
         if event.get("plot_available"):
             plots = event.get("plots")
             if not isinstance(plots, list) or not plots:

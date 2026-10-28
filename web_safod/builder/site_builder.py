@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,9 @@ from .assets import ensure_web_plots, load_cache, save_cache
 from .catalog import event_record_from_row, load_catalog, load_metadata_inventory
 from .config import resolve_path
 from .geometry import export_safod_geojson, fault_query_url
+from .geophones import build_comparisons, canonical_comparison_root, comparison_inventory
+from .geophone_display import load_display_settings
+from src.safod_deep.geophone_comparison import event_id as canonical_event_id
 
 
 def _sha256(path: Path) -> str:
@@ -126,6 +130,11 @@ def build_site(
     cache = load_cache(cache_path)
     records: list[dict[str, Any]] = []
     warnings: list[str] = []
+    comparison_root = canonical_comparison_root(repo_root)
+    if config.get("geophone_comparison_root"):
+        warnings.append("Legacy geophone_comparison_root is ignored; use config/safod_deep/geophone_comparison.json")
+    comparisons = comparison_inventory(comparison_root)
+    display_settings = load_display_settings(repo_root)
 
     for _, row in frame.iterrows():
         event_id = str(row["event_id"]).strip()
@@ -154,12 +163,24 @@ def build_site(
                 ),
             )
         )
+        records[-1]["geophone_comparisons"] = build_comparisons(
+            event_id, records[-1]["origin_time_utc"],
+            comparisons.get(canonical_event_id(event_id), []),
+            output_dir=plots_dir, cache=cache,
+            max_pixels=int(config["web_image_max_long_edge_px"]),
+            overwrite=overwrite_images,
+            metadata_rows=metadata_rows,
+            display_settings=display_settings,
+            render_dir=repo_root / "web_safod/cache/geophone_displays",
+        )
 
     save_cache(cache_path, cache)
 
     # Keep only plot files currently referenced by the event inventory.
     referenced = set()
     for event in records:
+        for comparison in event.get("geophone_comparisons", []):
+            referenced.add(Path(comparison["url"]).name)
         for plot in event.get("plots", []):
             if plot.get("url"):
                 referenced.add(Path(plot["url"]).name)
@@ -188,6 +209,7 @@ def build_site(
             bool(record.get("plot_available")) for record in records
         ),
         "focal_mechanisms_available": int(focal_count),
+        "geophone_comparisons_available": sum(bool(record.get("geophone_comparisons")) for record in records),
         "catalog_sha256": _sha256(catalog_path),
         "catalog_name": catalog_path.name,
         "elastic_das_git_commit": _git_commit(repo_root),
@@ -219,7 +241,15 @@ def build_site(
         "site_dir": str(site_dir),
         "events": len(records),
         "plots_available": site_status["plots_available"],
+        "geophone_comparisons_available": site_status["geophone_comparisons_available"],
         "warnings": warnings,
+    }
+    display_rows = [dict(event_id=event["event_id"], **comparison["display_window"])
+                    for event in records for comparison in event.get("geophone_comparisons", [])]
+    report["geophone_display"] = {
+        "settings": display_settings,
+        "counts": dict(Counter(row["mode"] for row in display_rows)),
+        "events": display_rows,
     }
     _write_json(report_path, report)
     return report

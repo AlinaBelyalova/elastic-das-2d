@@ -115,3 +115,7 @@ earlier handoffs and migrations: [docs/history/README.md](../docs/history/README
 - [Original QC v2 reference](validation/sbp_sat/reference_v2/validation_report.md)
 - Methodology and run commands: [docs/sbp_sat/validation.md](../docs/sbp_sat/validation.md);
   run comparison: [docs/status.md](../docs/status.md)
+
+## Catalog-wide geophone comparison
+
+`safod_deep/geophone_comparison/causal_5_40hz_o6_ref1694/` contains `events/<nc_id>/{traces.npz,comparison.png,metadata.json,state.json}`, `<output_dir>/reports/`, `cache/` and per-event `logs/`. Slurm logs are in `safod_deep/geophone_comparison/logs/`. The website reads this configured batch directory, not old one-event experiments. See the [runbook](../docs/safod/geophone_comparison.md).

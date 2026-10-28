@@ -44,7 +44,7 @@ function element() {
   };
 }
 
-function startApp(hash = "", { delayLayers = false, delayCatalog = false, missingFocal = false } = {}) {
+function startApp(hash = "", { delayLayers = false, delayCatalog = false, missingFocal = false, comparisons = [] } = {}) {
   const elements = new Map();
   const windowListeners = new Map();
   const errors = [];
@@ -107,7 +107,7 @@ function startApp(hash = "", { delayLayers = false, delayCatalog = false, missin
     circleMarker: (coordinates) => Object.assign(chain(), { coordinates }),
   };
   const data = {
-    "data/events.json": [event, otherEvent],
+    "data/events.json": [{ ...event, geophone_comparisons: comparisons }, otherEvent],
     "data/site_status.json": { recorded_events: 2, plots_available: 1 },
     "data/site_config.json": { map_center: [35.9, -120.5], map_default_zoom: 10 },
     "data/focal_mechanisms.json": {},
@@ -284,4 +284,91 @@ test("reveals an event hidden by filters before opening its popup", async () => 
   assertEventOpen(app);
   assert.equal(app.get("searchInput").value, "");
   assert.equal(app.get("visibleCount").textContent, "2 / 2");
+});
+
+const comparison = {
+  channel: 1694, channel_first: 1694, channel_last: 1694,
+  seed_id: "SF.MH029.01.GP1", metadata_seed_id: "SF.MH029.01.GP1",
+  metadata_fallback: false, fmin_hz: 5, fmax_hz: 30,
+  fir_group_delay_s: 0.2, filter_description: "causal one-pass linear-phase Hamming FIR bandpass",
+  url: "plots/nc75379261__geophone.webp",
+};
+
+test("comparison loads on demand and closes without changing the DAS section", async () => {
+  const app = startApp("#event=nc75379261", { comparisons: [comparison] });
+  await nextTurn();
+  assert.equal(app.get("geophoneCountText").textContent, "Geophone comparisons: 1 / 2");
+  assert.equal(app.get("geophoneImage").src, undefined);
+  app.get("geophoneToggle").dispatch("click");
+  assert.equal(app.get("geophoneImage").src, `${comparison.url}?v=test`);
+  assert.equal(app.get("geophoneToggle")["aria-expanded"], "true");
+  assert.equal(app.get("geophoneWarning").classList.contains("hidden"), true);
+  assert.equal(app.get("dialogPlot").src, `${event.plots[0].url}?v=test`);
+  app.get("geophoneToggle").dispatch("click");
+  assert.equal(app.get("geophonePanel").classList.contains("hidden"), true);
+});
+
+test("missing comparisons show a message and never retain the preceding event image", async () => {
+  const app = startApp("#event=nc75379261", { comparisons: [comparison] });
+  await nextTurn();
+  app.get("geophoneToggle").dispatch("click");
+  app.navigate("#event=nc75334592");
+  assert.equal(app.get("geophoneImage").src, undefined);
+  assert.equal(app.get("geophoneImageLink").href, undefined);
+  app.get("geophoneToggle").dispatch("click");
+  assert.equal(app.get("geophoneUnavailable").classList.contains("hidden"), false);
+  assert.equal(app.get("geophoneImageLink").classList.contains("hidden"), true);
+});
+
+test("a different prepared channel labels the waveform station and provisional response separately", async () => {
+  const provisional = { ...comparison, channel: 1279, channel_first: 1279, channel_last: 1279,
+    seed_id: "SF.MH030.01.GP1", metadata_fallback: true, url: "plots/other.webp" };
+  const app = startApp("#event=nc75379261", { comparisons: [comparison, provisional] });
+  await nextTurn();
+  app.get("geophoneToggle").dispatch("click");
+  app.get("geophoneSelector").value = "1";
+  app.get("geophoneSelector").dispatch("change");
+  assert.equal(app.get("geophoneImage").src, "plots/other.webp?v=test");
+  assert.match(app.get("geophoneDetails").textContent, /1279.*MH030/);
+  assert.match(app.get("geophoneWarning").textContent, /waveform SF.MH030.*metadata SF.MH029/);
+  assert.equal(app.get("geophoneWarning").classList.contains("hidden"), false);
+});
+
+test("a failed comparison image is hidden and can be retried", async () => {
+  const app = startApp("#event=nc75379261", { comparisons: [comparison] });
+  await nextTurn();
+  app.get("geophoneToggle").dispatch("click");
+  app.get("geophoneImage").dispatch("error");
+  assert.equal(app.get("geophoneUnavailable").classList.contains("hidden"), false);
+  assert.equal(app.get("geophoneImageLink").classList.contains("hidden"), true);
+  app.get("geophoneToggle").dispatch("click");
+  app.get("geophoneToggle").dispatch("click");
+  assert.equal(app.get("geophoneUnavailable").classList.contains("hidden"), true);
+  assert.equal(app.get("geophoneImageLink").classList.contains("hidden"), false);
+});
+
+test("an unknown saved filter delay is explicit rather than shown as zero", async () => {
+  const row = { ...comparison, fir_group_delay_s: null,
+    time_axis_note: "Saved display time minus raw sample time: -0.2 s." };
+  const app = startApp("#event=nc75379261", { comparisons: [row] });
+  await nextTurn();
+  app.get("geophoneToggle").dispatch("click");
+  assert.match(app.get("geophoneDetails").textContent, /filter delay not recorded/);
+  assert.match(app.get("geophoneDetails").textContent, /raw sample time: -0.2 s/);
+  assert.doesNotMatch(app.get("geophoneDetails").textContent, /delay null|delay 0 s/);
+});
+
+test("FINAL causal comparison shows strain rate only and keeps DataRow distinct from physical reference", async () => {
+  const row = { ...comparison, channel: 1278, channel_first: 1278, channel_last: 1278,
+    channel_label: "DAS DataRow 1278 · physical reference 1694.25", filter_kind: "dasutils_causal",
+    filter_description: "DASutils.bandpass2D_c, order=6, zerophase=False", fir_group_delay_s: null };
+  const app = startApp("#event=nc75379261", { comparisons: [row] });
+  await nextTurn();
+  app.get("geophoneToggle").dispatch("click");
+  assert.match(app.get("geophoneImage").alt, /axial strain rate and acceleration/);
+  assert.doesNotMatch(app.get("geophoneImage").alt, /strain\/velocity/);
+  assert.match(app.get("geophoneDetails").textContent, /DataRow 1278.*physical reference 1694.25/);
+  assert.match(app.get("geophoneDetails").textContent, /zerophase=False/);
+  assert.match(app.get("geophoneDetails").textContent, /no delay compensation/);
+  assert.doesNotMatch(app.get("geophoneDetails").textContent, /FIR delay/);
 });

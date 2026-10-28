@@ -24,7 +24,8 @@ writes.
   (SBP-SAT). Layout and names of result folders:
   [results/README.md](../../results/README.md).
 - Scripts with a fixed result folder create it themselves and overwrite files
-  in it without warning. Only `sbp_sat.time_energy_qc` and `sbp_sat.oblique_qc`
+  in it without warning. `sbp_sat.time_energy_qc`, `sbp_sat.oblique_qc`
+  `sbp_sat.das_chain_qc`, `sbp_sat.absorbing_qc` and `sbp_sat.pipeline_qc`
   have protection against writing into a non-empty folder (`--overwrite`).
 
 Times are measurements from 2026-10-16 on a Sherlock compute node: `fwi`
@@ -35,9 +36,14 @@ measured" means the check was not run when the table was compiled.
 
 | Check (`python -m ...`) | What it checks | Time | Pass criterion | Writes to |
 | --- | --- | --- | --- | --- |
+| `scripts.validation.sbp_sat.checkpoint_qc` | exact checkpoint/full-history objective, data and gradients; physical-source DAS Taylor and central difference; allocation-free event history estimate | small manufactured model | parity < 1e-12; Taylor slopes in (1.9,2.1); central-difference relative error < 2e-6 | stdout; optional `summary.json`, `checkpoint_qc.npz`; details in [checkpointing.md](../../docs/sbp_sat/checkpointing.md) |
+| `scripts.benchmarks.sbp_sat` | bounded Numba vs independent CSR, fields and native receiver parity, allocation-aware thread count and warm/repeated timings | hardware-dependent | field/receiver relative errors < 1e-11; no timing threshold | stdout; optional `summary.json` with repeat medians and compilation time |
+| `scripts.validation.sbp_sat.pipeline_qc` | existing moment/STF API, off-grid quadrature source, native CSR SBP/DAS, same-chain transpose and impedance-dependent gradient | not measured on Sherlock | source normalization < 1e-14; dense/CSR and dot-product errors < 1e-11; Taylor slopes in (1.9,2.1) | stdout; optional `summary.json`, `outputs_sbp_pipeline_qc.npz` |
 | `scripts.validation.sbp_sat.operator_qc` | QC 1: SBP identity for the staggered operators and semi-discrete energy rate with SAT | ~0.2–0.3 s | max SBP residual ≤ 1e-12 and relative dE/dt residual ≤ 1e-12; prints `PASSED` | stdout only |
 | `scripts.validation.sbp_sat.adjoint_dot_product` | QC 3: exact discrete adjoint operator source → data, `<F s, q> = <s, F^T q>` | ~0.2–0.3 s | relative error ≤ 1e-11 | stdout only |
 | `scripts.validation.sbp_sat.taylor` | QC 4: Taylor test for the gradient with respect to `log(Vp)`, `log(Vs)` at fixed `rho` | ~0.9 s | R0 slope in (0.8, 1.2), R1 slope in (1.7, 2.3), relative error of the directional derivative against a central difference ≤ 1e-5 | stdout only |
+| `scripts.validation.sbp_sat.das_chain_qc` | full source → SBP-SAT → curved off-grid receivers → finite-gauge DAS transpose and rho-fixed gradient; three source components | not measured on Sherlock | dot-product error < 1e-11; Taylor slopes in (1.9, 2.1); finite nonzero signal and sensitivity | stdout only; optional `summary.json`, `traces.npz` |
+| `scripts.validation.sbp_sat.absorbing_qc` | bounded x/z, free top and impedance sides/bottom: exact energy loss, full DAS transpose/gradient including impedances, outgoing normal-P packet and free control | not measured on Sherlock | energy-balance error < 1e-12; dot product < 1e-11; Taylor slopes in (1.9,2.1); packet energy decreases under refinement and is < 1e-4 at h=1 | stdout only; optional `summary.json`, `traces.npz` |
 | `scripts.validation.sbp_sat.normal_incidence_qc` | QC 2: reflection of P and SV Gaussian packets at normal incidence on the free surface; surface velocity equals twice the incident; h = 10, 5, 2.5 m | > 30 s (stopped by `timeout 30`; full time not measured) | relative L2 error strictly decreases with refinement for P and SV; peak and traction are printed without a threshold | stdout only |
 | `scripts.validation.sbp_sat.time_energy_qc` | fully discrete leapfrog energy: heterogeneous 32×41 model, no source and no attenuation, 0.5 s | ~1.5 s | energies finite and positive, invariant drift < 1e-9, change of centered energy < 5% | stdout only; with `--output-dir`, `summary.json`, `traces.npz`; with `--plot`, PNG |
 | `scripts.validation.sbp_sat.oblique_qc` | oblique incidence of P (30°, 60°) and SV (20°, 30°): full-field evolution against the continuum solution; h = 10, 5, 2.5, 1.25 m | > 30 s (stopped by `timeout 30`; full time not measured) | waveform and traction errors decrease at every refinement step; on the finest grid five metrics ≤ 0.01 (details in [validation.md](../../docs/sbp_sat/validation.md)) | stdout only; with `--output-dir`, `summary.json`, `traces.npz`; with `--plot`, PNG |

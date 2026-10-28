@@ -1,5 +1,19 @@
 # SAFOD: workflow
 
+SBP-SAT is available explicitly with `--backend sbp_sat` in both
+`scripts.safod.run_forward` and `scripts.safod.compare_event`.
+Source/STF, geometry, dt, output layout and commands:
+[SBP-SAT event backend](../sbp_sat/pipeline.md). The default backend remains
+`numba_fused`; the 3-D Zhang/Lin reference arrivals are unchanged.
+
+Forward model and wavefield plots show the full saved computational grid.
+`run_forward --render-only` updates the existing PNG/GIF from NPZ/snapshots;
+full-domain bounds and the command are in the SBP-SAT runbook linked above.
+
+Selected SBP now defaults to compiled Numba execution. Four-CPU Slurm command,
+CSR reference switch and verified performance scope:
+[compiled SBP-SAT](../sbp_sat/numba.md).
+
 Steps, commands, inputs and outputs of the SAFOD part of the project.
 Scientific conventions (2-D section, vertical datum, comparison policy, model
 choice) are not restated here: they are in
@@ -197,8 +211,10 @@ waveform display shift are preserved. The real-only plot retains pre-event data.
 - Without `--overwrite`, `run_forward` does not overwrite an existing package;
   `--no-gif` disables field snapshots and GIF; `--nt` is the number of steps
   (default 12000).
-- `run_forward` is a full computation and is run in a Slurm job. There is no
-  ready `.sbatch` in the project; time and memory are not recorded.
+- Ordinary `run_forward` performs propagation in a compute allocation;
+  `scripts/safod/run_forward_sbp_sat.sbatch` requests four CPUs and 16 GiB.
+  `--render-only` instead uses the saved forward/snapshot arrays and skips
+  propagation. It intentionally updates only the existing model PNG and GIF.
 - The scripts do not write a log themselves. For `20260618_75379261` the output
   was saved by hand in `results/events/20260618_75379261/logs/` as
   `forward_<nc_key>_<model>.log` and `compare_<nc_key>_<model>.log`.

@@ -34,6 +34,16 @@ python -m scripts.validation.sbp_sat.operator_qc
 python -m scripts.validation.sbp_sat.adjoint_dot_product
 python -m scripts.validation.sbp_sat.taylor
 python -m scripts.validation.sbp_sat.normal_incidence_qc
+python -m scripts.validation.sbp_sat.das_chain_qc
+python -m pytest -q tests/test_sbp_sat_foundations.py tests/test_sbp_sat_das.py
+python -m scripts.validation.sbp_sat.absorbing_qc
+python -m pytest -q tests/test_sbp_sat_absorbing.py
+python -m scripts.validation.sbp_sat.pipeline_qc
+python -m pytest -q tests/test_sbp_sat_pipeline.py
+python -m pytest -q tests/test_sbp_sat_numba.py
+python -m pytest -q tests/test_sbp_sat_boundary_control.py
+python -m pytest -q tests/test_sbp_sat_checkpointing.py
+python -m scripts.validation.sbp_sat.checkpoint_qc
 python -m scripts.validation.sbp_sat.time_energy_qc \
   --output-dir results/validation/sbp_sat/<label>_<YYYYMMDD>/time_energy --plot
 python -m scripts.validation.sbp_sat.oblique_qc \
@@ -63,6 +73,11 @@ three quick checks are listed in
 [scripts/validation/README.md](../../scripts/validation/README.md).
 
 ## What the oblique test checks
+
+The actual event-domain sensitivity check is separate from the analytical
+oblique/free-surface benchmark below. It replays an existing saved SBP
+forward and extends its frozen materials outward with the same dt/source/DAS.
+Commands, outputs and interpretation: [boundary_control.md](boundary_control.md).
 
 Cases: incident P at 30 and 60 degrees; incident SV at 20 and 30 degrees.
 Angles are measured from the vertical. Material properties are Vp=5000 m/s,
@@ -187,10 +202,63 @@ or validate sponge/PML integration.
 
 ## Scope after these checks
 
+### Bounded domain and absorbing SATs
+
+`absorbing_qc` checks the separate bounded reference in
+`src/sbp_sat/rectangular.py`: a free top and impedance sides/bottom. It gates
+the exact source-free modified-energy balance below 1e-12 relative to
+initial energy, positive and non-increasing energy, complete source-to-DAS
+transpose error below 1e-11 and Taylor slopes in (1.9,2.1). An outgoing
+normal-P packet in the decoupled near-lambda=0 limit must retain less than
+1e-4 of its initial energy at h=1 and improve at h=0.5; the free-bottom
+control must conserve energy within 1e-12. It does not claim exact oblique
+absorption or implement PML.
+
+With `--output-dir` it writes `summary.json` and `traces.npz`; a nonempty
+directory requires explicit `--overwrite`. Its 28 new pytest cases add
+individual-face and corner energy checks, deliberately wrong absorption
+signs, native and implicit-solve transposes, independent spectrum, strictly
+bounded sampling, three source components, separate Vp/Vs and boundary-only
+Taylor directions, and a negative control omitting impedance derivatives.
+Derivation, physical limits and complexity: [absorbing](absorbing.md).
+
+### Periodic reference and finite-gauge integration
+
+The foundation and DAS update adds 43 automated mathematical cases. They
+include polynomial accuracy and positive norms at the smallest supported
+grid, both isolated boundary fluxes for shear and normal pairs, disabled or
+wrong-sign upper SAT inside the actual 2-D RHS, single-step transpose,
+native periodic seam sampling, repeated/overlapping scatter, source timing,
+all three grid stress-rate source components and strict geometry rejection.
+A small independently assembled propagation matrix checks the conservative
+timestep certificate and detects an unstable step beyond the actual limit.
+
+`das_chain_qc` verifies the complete source -> SBP-SAT -> native-grid
+interpolation -> finite-gauge DAS map. It gates source-to-DAS dot-product
+error below 1e-11 and Taylor slopes between 1.9 and 2.1. Tests separately
+perturb log(Vp), log(Vs), and both, at fixed density and dt. The manufactured
+curved receiver geometry has non-integer gauge length/channel-spacing ratio.
+With `--output-dir` it saves `summary.json` and `traces.npz`; nonempty output
+directories require explicit `--overwrite`. It does not need Oak or SAFOD
+velocity models. Mathematical details and scope: [integration](integration.md).
+
 The source-to-point-receiver transpose and rho-fixed log(Vp)/log(Vs) gradient
-remain covered by the original dot-product and Taylor tests. These additions
-do not add DAS, Numba, arbitrary sources, absorbing boundaries, SAFOD geometry,
-postcritical/evanescent SV-to-P reflection or a production FWI driver.
+remain covered by the original dot-product and Taylor tests. DAS now has its
+own complete-chain checks above. The [SAFOD adapter](pipeline.md) adds off-grid
+moment sources and bounded CSR forward/comparison. Compiled forward and
+[checkpoint/replay](checkpointing.md) are available; compiled reverse/VJP,
+a postcritical/evanescent SV-to-P benchmark and a production
+SAFOD inversion driver remain follow-up work.
+
+`pipeline_qc` uses the existing physical-source API, a manufactured SI medium,
+off-grid double couple and curved finite-gauge DAS. It gates quadrature source
+normalization below 1e-14, dense/CSR output difference below 1e-11, complete
+source/DAS transpose below 1e-11 and gradient Taylor slopes in (1.9,2.1).
+`--output-dir` saves `summary.json` and `outputs_sbp_pipeline_qc.npz`; a
+nonempty directory requires `--overwrite`. The 16 new automated cases also
+exercise the actual SAFOD driver with synthetic model inputs (preflight,
+NPZ, native snapshots) and actual compare filtering/figures with stubbed
+external eikonal predictions. Neither replaces a real-event Sherlock run.
 
 The current stage and next steps are maintained in
 [docs/status.md](../status.md). Formulas and function mapping are maintained

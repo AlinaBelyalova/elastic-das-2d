@@ -24,6 +24,7 @@ while special second-order closures are used near the boundaries.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 import numpy as np
 
 
@@ -52,8 +53,8 @@ class StaggeredSBP1D:
         e_right[-1] = 1.0
 
         lhs = (
-            np.diag(self.H_N) @ self.D_M_to_N
-            + (np.diag(self.H_M) @ self.D_N_to_M).T
+            self.H_N[:, None] * self.D_M_to_N
+            + (self.H_M[:, None] * self.D_N_to_M).T
         )
         rhs = (
             -np.outer(e_left, self.p_left)
@@ -79,6 +80,8 @@ def staggered_sbp_4_2(n_intervals: int, h: float) -> StaggeredSBP1D:
     The published coefficients are given for h=1. Derivative matrices are
     therefore divided by h and norm weights multiplied by h here.
     """
+    if isinstance(n_intervals, (bool, np.bool_)) or not isinstance(n_intervals, Integral):
+        raise ValueError("n_intervals must be an integer, without truncation.")
     if n_intervals < 8:
         raise ValueError(
             "n_intervals must be at least 8 for the 4-2 staggered SBP closure."

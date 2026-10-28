@@ -361,6 +361,7 @@ class ElasticRunResult:
     receiver_vz: np.ndarray
     snapshots_vz: np.ndarray | None
     snapshot_times_v: np.ndarray | None
+    solver_metadata: dict | None = None
 
     @property
     def t(self) -> np.ndarray:

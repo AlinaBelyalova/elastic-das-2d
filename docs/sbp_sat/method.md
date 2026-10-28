@@ -71,9 +71,9 @@ For arrays stored as `[ix,iz]`, a z derivative is applied as `f @ D.T`;
 its Euclidean transpose is `q @ D`. This array-layout transpose is distinct
 from the physical SBP integration-by-parts identity.
 
-The constructor checks the SBP residual against `5e-13`. Polynomial accuracy,
-positive norms, boundary traces, and several grid sizes also need independent
-small tests; the existing operator QC checks one SBP grid and one 2D energy case.
+The constructor checks the SBP residual against `5e-13`. Automated tests now
+cover polynomial accuracy, positive norms and boundary traces at 8, 9, 12 and
+40 intervals with two non-unit spacings; see [integration](integration.md).
 
 ## SAT terms and energy cancellation
 
@@ -130,8 +130,11 @@ sxx[ix,iz] += dt * mxx * stf[n]
 szz[ix,iz] += dt * mzz * stf[n]
 ```
 
-`StressPointSource` injects normal stresses only, on one N-N node. The
-products `mxx*stf`, `mzz*stf` have units Pa/s. No cell-volume or seismic-moment
+`StressPointSource` injects normal stresses on one N-N node. Optional `mxz`
+uses four equal weights on the surrounding M-M shear nodes and its transpose
+gathers with the same weights. Nonzero shear needs `1 <= iz < n_intervals`;
+x indices wrap periodically, z support is never clipped. The products
+`mxx*stf`, `mzz*stf`, `mxz*stf` have units Pa/s. No cell-volume or seismic-moment
 normalization is supplied by this prototype. Source-to-SAFOD amplitude
 mapping remains an integration task. Data samples precede the source
 injection of the same iteration; the final source sample therefore affects
@@ -149,8 +152,8 @@ invariant. The QC also evaluates physical energy with
 `v_centred = v + (dt/2)*A*sigma`. The cross term and its sign follow from
 the stored time levels above. Conservation alone does not establish a stable
 choice of dt: positivity of the quadratic and a timestep bound must also be
-checked. Existing experiments use conservative dt values; they do not prove
-a sharp CFL bound for every model.
+checked. Full forward and adjoint runs now enforce a sufficient bound derived
+in [integration](integration.md). It is conservative, not a sharp CFL limit.
 
 ## Exact adjoint and model gradient
 
@@ -179,7 +182,9 @@ checkpointing is deferred.
 
 ## Formula to code to check
 
-All functions below except the first row currently live in `elastic2d.py`.
+Core propagation and gradient functions below live in `elastic2d.py`;
+`boundaries.py` holds the traction SAT and its transpose. `observations.py`
+connects the core to finite-gauge DAS; `stability.py` certifies the timestep.
 Validation module names have the prefix `scripts.validation.sbp_sat.`.
 
 | Responsibility | Function | Existing QC |
@@ -204,8 +209,17 @@ results and the next task in [docs/status.md](../status.md).
 
 ## Deferred integration
 
-The reference has no absorbing boundaries, arbitrary off-grid sources,
-production receiver geometry, finite-gauge DAS, Numba kernels, checkpointing,
-or SAFOD loaders. Adding each operator requires a matching transpose and
-new validation of the complete chain. Planned work and its order are
-maintained in [docs/status.md](../status.md).
+Off-grid receiver interpolation and finite-gauge DAS now have a complete
+source-to-DAS transpose and model-gradient check; see [integration](integration.md).
+This periodic reference is retained as a controlled mathematical baseline.
+The [bounded reference](absorbing.md) and [SAFOD backend](pipeline.md) add
+impedance boundaries, off-grid moment sources and forward/comparison routing
+with matching transposes. [Compiled Numba execution](numba.md) now accelerates
+the bounded forward, and [checkpoint/replay](checkpointing.md) reduces its
+model-gradient history. Absolute 3-D earthquake-moment amplitude calibration
+and compiled reverse/VJP remain outside that implementation.
+Planned work is in [docs/status.md](../status.md).
+
+A separate [bounded-domain reference](absorbing.md) adds impedance absorption
+and its full transpose/material derivatives while preserving this periodic
+reference and all existing controlled checks.

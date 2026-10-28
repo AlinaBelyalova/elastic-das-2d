@@ -30,6 +30,7 @@ def run_forward_simulation(
     snapshot_stride: int | None = None,
     backend: str = "numba_fused",
     free_surface: bool = False,
+    sbp_execution: str = "numba",
 ) -> tuple[ElasticRunResult, DASResult]:
     """
     Run the full elastic forward simulation and post-process into DAS strain-rate.
@@ -58,12 +59,27 @@ def run_forward_simulation(
     snapshot_stride : int or None
         Save vz snapshots every snapshot_stride steps.
     backend : str
-        Solver backend: "numba_fused" (default) or "numpy" (reference/debug).
-        Bilinear spreading is only supported for "numba_fused".
+        "numba_fused" (default), "numpy" (legacy reference), or "sbp_sat".
+        SBP uses bounded native grids, a sufficient dt certificate and local
+        impedance faces; n_boundary/gamma_s have no damping role in SBP.
+        Bilinear spreading is supported by numba_fused and sbp_sat.
     free_surface : bool
         Enable stress-free top boundary condition.
+    sbp_execution : str
+        For backend="sbp_sat", use compiled "numba" (default) or the
+        independent "csr" reference. Other backends are unchanged.
     """
     grid = model.grid
+
+    if backend == "sbp_sat":
+        if half_order != 2 or use_ts_sfd:
+            raise ValueError("sbp_sat uses the fixed 4-2 SBP pair; require half_order=2, use_ts_sfd=False.")
+        # n_boundary/gamma_s apply only to the legacy sponge. SBP uses SATs
+        # at the computational faces and retains the supplied physical grid.
+        from src.sbp_sat.simulator import run_forward_simulation as run_sbp
+        return run_sbp(model, source, receivers, gauge_length_m,
+                       snapshot_stride=snapshot_stride, free_surface=free_surface,
+                       execution=sbp_execution)
 
     if source.stf.nt != grid.nt:
         raise ValueError(
@@ -146,7 +162,7 @@ def run_forward_simulation(
 
     else:
         raise ValueError(
-            f"Unknown backend='{backend}'. Valid options: 'numba_fused', 'numpy'."
+            f"Unknown backend='{backend}'. Valid options: 'numba_fused', 'numpy', 'sbp_sat'."
         )
 
     das_result = compute_axial_strain_rate(

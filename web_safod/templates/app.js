@@ -30,6 +30,7 @@
     updatedText: document.getElementById("updatedText"),
     plotCountText: document.getElementById("plotCountText"),
     focalCountText: document.getElementById("focalCountText"),
+    geophoneCountText: document.getElementById("geophoneCountText"),
     mapNotice: document.getElementById("mapNotice"),
     dialog: document.getElementById("eventDialog"),
     closeDialog: document.getElementById("closeDialog"),
@@ -44,6 +45,15 @@
     officialEventLink: document.getElementById("officialEventLink"),
     fullImageLink: document.getElementById("fullImageLink"),
     arrivalsToggle: document.getElementById("arrivalsToggle"),
+    geophoneToggle: document.getElementById("geophoneToggle"),
+    geophonePanel: document.getElementById("geophonePanel"),
+    geophoneUnavailable: document.getElementById("geophoneUnavailable"),
+    geophoneSelectorWrap: document.getElementById("geophoneSelectorWrap"),
+    geophoneSelector: document.getElementById("geophoneSelector"),
+    geophoneDetails: document.getElementById("geophoneDetails"),
+    geophoneWarning: document.getElementById("geophoneWarning"),
+    geophoneImageLink: document.getElementById("geophoneImageLink"),
+    geophoneImage: document.getElementById("geophoneImage"),
     measureDistance: document.getElementById("measureDistance"),
     clearMeasurement: document.getElementById("clearMeasurement"),
     measureStatus: document.getElementById("measureStatus"),
@@ -858,6 +868,64 @@
     return event.plots[state.currentPlotIndex] || event.plots[0];
   }
 
+  function resetGeophonePanel() {
+    els.geophonePanel.classList.add("hidden");
+    els.geophoneToggle.setAttribute("aria-expanded", "false");
+    els.geophoneToggle.textContent = "Show geophone + DAS trace";
+    els.geophoneImage.removeAttribute("src");
+    els.geophoneImageLink.removeAttribute("href");
+    els.geophoneImageLink.classList.add("hidden");
+    els.geophoneWarning.classList.add("hidden");
+    els.geophoneUnavailable.textContent = "No prepared geophone/DAS comparison is available for this event.";
+    els.geophoneUnavailable.classList.add("hidden");
+    els.geophoneDetails.textContent = "";
+    els.geophoneSelector.innerHTML = "";
+  }
+
+  function selectGeophoneComparison() {
+    const rows = state.currentEvent?.geophone_comparisons || [];
+    const row = rows[Number(els.geophoneSelector.value)] || rows[0];
+    if (!row) return;
+    const url = versionedAssetUrl(row.url);
+    els.geophoneImage.src = url;
+    els.geophoneImage.alt = `${state.currentEvent.event_id}: ${row.channel_label || `DAS channel ${row.channel}`} and ${row.seed_id}; axial strain rate and acceleration; causal, non-zero-phase`;
+    els.geophoneImageLink.href = url;
+    els.geophoneImageLink.classList.remove("hidden");
+    els.geophoneUnavailable.classList.add("hidden");
+    const channelLabel = row.channel_first !== row.channel_last
+      ? `DAS median over channels ${row.channel_first}–${row.channel_last}`
+      : (row.channel_label || `DAS channel ${row.channel}`);
+    const delayLabel = row.filter_kind === "dasutils_causal"
+      ? "no delay compensation"
+      : finite(row.fir_group_delay_s)
+      ? `saved FIR delay ${row.fir_group_delay_s} s`
+      : "filter delay not recorded";
+    els.geophoneDetails.textContent = `${channelLabel} · ${row.seed_id} · ${row.fmin_hz}–${row.fmax_hz} Hz. ` +
+      `${row.filter_description}; ${delayLabel}. ` +
+      (row.time_axis_note ? `${row.time_axis_note} ` : "") +
+      "Time from catalog origin; independent physical amplitude scales. " +
+      "No additional normalisation or relative time shift is applied by the viewer. " +
+      "Axial strain rate and GP1 acceleration have different physical units.";
+    const provisional = Boolean(row.metadata_fallback || row.metadata_seed_id !== row.seed_id);
+    els.geophoneWarning.classList.toggle("hidden", !provisional);
+    els.geophoneWarning.textContent = provisional
+      ? `Provisional response metadata: waveform ${row.seed_id}, metadata ${row.metadata_seed_id}.`
+      : "";
+  }
+
+  function toggleGeophonePanel() {
+    const opening = els.geophonePanel.classList.contains("hidden");
+    els.geophonePanel.classList.toggle("hidden", !opening);
+    els.geophoneToggle.setAttribute("aria-expanded", String(opening));
+    els.geophoneToggle.textContent = opening
+      ? "Hide geophone + DAS trace" : "Show geophone + DAS trace";
+    if (!opening) return;
+    const rows = state.currentEvent?.geophone_comparisons || [];
+    els.geophoneUnavailable.classList.toggle("hidden", rows.length > 0);
+    els.geophoneSelectorWrap.classList.toggle("hidden", rows.length < 2);
+    if (rows.length) selectGeophoneComparison();
+  }
+
   function refreshDisplayedPlot() {
     const plot = currentPlot();
     if (!plot) return;
@@ -906,6 +974,15 @@
     if (!event) return;
 
     state.currentEvent = event;
+    resetGeophonePanel();
+    (event.geophone_comparisons || []).forEach((row, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = `${row.channel_label || `DAS ch ${row.channel}`} · ${row.seed_id} · ${row.fmin_hz}–${row.fmax_hz} Hz · causal` +
+        (row.variant ? ` · ${row.variant}` : "");
+      els.geophoneSelector.appendChild(option);
+    });
+    els.geophoneSelector.value = "0";
     els.dialogTitle.textContent = `${fmtMagnitude(event)} · ${event.event_id}`;
     els.dialogSubtitle.textContent = event.location_name || "SAFOD / Parkfield region";
 
@@ -957,6 +1034,7 @@
   }
 
   function closeEventDialog() {
+    resetGeophonePanel();
     if (els.dialog.open) els.dialog.close();
     state.currentEvent = null;
     state.currentPlotIndex = 0;
@@ -1005,13 +1083,23 @@
       selectPlot(Number(els.plotSelector.value));
     });
     els.arrivalsToggle.addEventListener("click", toggleArrivals);
+    els.geophoneToggle.addEventListener("click", toggleGeophonePanel);
+    els.geophoneSelector.addEventListener("change", selectGeophoneComparison);
+    els.geophoneImage.addEventListener("error", () => {
+      if (!els.geophoneImage.src || els.geophonePanel.classList.contains("hidden")) return;
+      els.geophoneImageLink.classList.add("hidden");
+      els.geophoneUnavailable.textContent = "Comparison image could not be loaded. Close and reopen the comparison to retry.";
+      els.geophoneUnavailable.classList.remove("hidden");
+    });
     window.addEventListener("hashchange", openHashEvent);
   }
 
   function updateStatus() {
     const status = state.status;
+    const geophoneCount = state.events.filter((event) => event.geophone_comparisons?.length).length;
     els.statusSummary.textContent =
-      `${status.recorded_events} events · ${status.plots_available} DAS plots`;
+      `${status.recorded_events} events · ${status.plots_available} DAS plots · ${geophoneCount} geophone comparisons`;
+    els.geophoneCountText.textContent = `Geophone comparisons: ${geophoneCount} / ${status.recorded_events}`;
 
     const first = status.event_time_start_utc
       ? dateToken(status.event_time_start_utc)

@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -35,6 +37,8 @@ from src.safod.models import (
     fault_x_at_z,
 )
 from src.elastic.source import build_dc_source
+from src.common.grid import Grid2D
+from src.common.model import ElasticModel2D
 from src.das.receivers import (
     build_das_cable,
     build_receivers_from_channel_centres,
@@ -51,6 +55,11 @@ from scripts.safod.settings import (
     SAFOD_SCIENTIFIC_X_MIN_M,
     forward_dir_for_theta,
     forward_run_tag,
+    FORWARD_BACKENDS,
+    FORWARD_PADDING_CELLS,
+    SBP_X_MIN_M,
+    SBP_X_MAX_M,
+    SBP_Z_MAX_M,
 )
 
 # ==============================================================================
@@ -924,12 +933,10 @@ def trim_cable_for_solver_domain(
     Returns the retained x/z arrays and the Boolean mask into the original
     registered geometry so channel identity is preserved exactly.
 
-    For free_surface=True:
-      - top sponge is disabled, so shallow receivers are allowed;
-      - but receivers should stay below the ghost/stencil region.
-
-    For side and bottom boundaries:
-      - receivers must stay outside the sponge region.
+    The legacy backend excludes its sponge using n_boundary. SBP passes zero
+    and validates native interpolation support separately. The existing
+    half_order+1 shallow channel cutoff is retained for both backends; SBP
+    does not use legacy ghost cells. No receiver coordinates are clipped.
     """
     x_cable = np.asarray(x_cable, dtype=np.float64)
     z_cable = np.asarray(z_cable, dtype=np.float64)
@@ -1274,14 +1281,14 @@ def make_wavefield_gif(
     fps: int = 6,
     max_frames: int = 80,
     percentile_clip: float = 99.5,
+    plot_z_min_m: float | None = None,
+    domain_label: str = "Full computational domain",
 ) -> None:
     """
-    Make a Vz wavefield GIF over the scientific model domain only.
+    Draw saved native Vz samples over the requested physical bounds.
 
-    The solver snapshots contain the complete computational grid, including
-    side and bottom absorbing sponge cells. Those cells are intentionally
-    excluded from both the displayed image and the colour-scale calculation.
-    Boundary-performance QC belongs in a separate validation figure.
+    The event driver passes the full material grid. Pixel edges are half a
+    native spacing from sample centres. No internal reference region is drawn.
     """
     snapshots_vz = np.asarray(snapshots_vz, dtype=np.float64)
     snapshot_times = np.asarray(snapshot_times, dtype=np.float64)
@@ -1319,13 +1326,16 @@ def make_wavefield_gif(
 
     x_grid = np.asarray(grid.x, dtype=np.float64)
     z_grid = np.asarray(grid.z, dtype=np.float64)
+    plot_z_min_m = float(z_grid[0]) if plot_z_min_m is None else float(plot_z_min_m)
+    if not np.isfinite(plot_z_min_m) or plot_z_min_m >= plot_z_max_m:
+        raise ValueError("GIF depth limits must be finite and increasing.")
 
     x_keep = (
         (x_grid >= float(plot_x_min_m) - 0.5 * grid.dx)
         & (x_grid <= float(plot_x_max_m) + 0.5 * grid.dx)
     )
     z_keep = (
-        (z_grid >= float(z_grid[0]) - 0.5 * grid.dz)
+        (z_grid >= plot_z_min_m - 0.5 * grid.dz)
         & (z_grid <= float(plot_z_max_m) + 0.5 * grid.dz)
     )
 
@@ -1334,7 +1344,7 @@ def make_wavefield_gif(
 
     if ix.size < 2 or iz.size < 2:
         raise ValueError(
-            "Scientific GIF crop contains too few grid points: "
+            "GIF view contains too few grid points: "
             f"nx={ix.size}, nz={iz.size}."
         )
 
@@ -1353,8 +1363,7 @@ def make_wavefield_gif(
             dtype=np.int64,
         )
 
-    # Scale from the scientific domain only. Hidden sponge amplitudes must not
-    # determine the displayed dynamic range.
+    # One colour scale over every displayed frame and the complete shown grid.
     sample_vals = []
     for iframe in frame_ids:
         frame = _snapshot_frame_2d(
@@ -1363,6 +1372,8 @@ def make_wavefield_gif(
             nx=grid.nx,
             nz=grid.nz,
         )
+        if not np.isfinite(frame).all():
+            raise ValueError("Wavefield snapshots contain NaN/Inf.")
         sample_vals.append(
             crop_frame(frame).ravel()
         )
@@ -1374,15 +1385,16 @@ def make_wavefield_gif(
             percentile_clip,
         )
     )
+    del sample_vals
 
     if not np.isfinite(vmax) or vmax <= 0.0:
         vmax = 1.0
 
     extent = [
-        float(x_grid[ix[0]]),
-        float(x_grid[ix[-1]]),
-        float(z_grid[iz[-1]]),
-        float(z_grid[iz[0]]),
+        float(x_grid[ix[0]]) - grid.dx / 2,
+        float(x_grid[ix[-1]]) + grid.dx / 2,
+        float(z_grid[iz[-1]]) + grid.dz / 2,
+        float(z_grid[iz[0]]) - grid.dz / 2,
     ]
 
     x_cable = np.asarray(x_cable, dtype=np.float64)
@@ -1392,7 +1404,7 @@ def make_wavefield_gif(
     fig.subplots_adjust(
         left=0.12,
         right=0.86,
-        top=0.98,
+        top=0.94,
         bottom=0.08,
     )
 
@@ -1488,8 +1500,9 @@ def make_wavefield_gif(
     )
     ax.set_ylim(
         float(plot_z_max_m),
-        float(z_grid[0]),
+        plot_z_min_m,
     )
+    ax.set_title(domain_label, fontsize=9, pad=9)
     ax.set_xlabel(
         "Projected 2D section coordinate X [m]",
         fontsize=13,
@@ -1567,6 +1580,200 @@ def make_wavefield_gif(
     plt.close(fig)
 
     print(f"Saved wavefield GIF to: {out_path}")
+    from PIL import Image
+
+    with Image.open(out_path) as saved:
+        print(f"GIF frames written: {saved.n_frames}")
+
+
+def forward_domain_label(backend, free_surface):
+    return (
+        "Full computational domain\nTop: free; sides/bottom: impedance SAT"
+        if backend == "sbp_sat" and free_surface
+        else "Full computational domain"
+    )
+
+
+def save_forward_domain_figures(
+    grid,
+    model,
+    source,
+    receivers_x,
+    receivers_z,
+    metadata,
+    snapshots,
+    times,
+    out_dir,
+    *,
+    backend,
+    free_surface,
+):
+    """Model and Vz GIF use exactly the full physical computational bounds."""
+    left, right = float(grid.x[0]), float(grid.x[-1])
+    top, bottom = float(grid.z[0]), float(grid.z[-1])
+    label = forward_domain_label(backend, free_surface)
+    fig, ax = plot_safod_model(
+        grid=grid,
+        model=model,
+        x_cable=receivers_x,
+        z_cable=receivers_z,
+        metadata=metadata,
+        field="vp",
+        show_fault=True,
+        show_tie_point=True,
+        show_offset_segment=True,
+    )
+    # N-N Vp samples sit at grid nodes, including the physical endpoints.
+    # Half-pixel extent keeps centres at their actual coordinates; the axes
+    # clip the two outer half-pixels at the physical boundary.
+    if ax.images:
+        ax.images[0].set_extent(
+            (
+                left - grid.dx / 2,
+                right + grid.dx / 2,
+                bottom + grid.dz / 2,
+                top - grid.dz / 2,
+            )
+        )
+    ax.scatter(
+        [source.x_embedded_m],
+        [source.z_embedded_m],
+        marker="*",
+        s=150,
+        c="yellow",
+        edgecolors="black",
+        zorder=20,
+        label="Source",
+    )
+    ax.set_xlim(left, right)
+    ax.set_ylim(bottom, top)
+    ax.set_title(label, fontsize=10)
+    place_safod_legend(fig, ax, fontsize=8)
+    style_figure_text_bold(fig, main_axis=ax)
+    fig.savefig(out_dir / "01_model_vp_with_source.png", dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    if snapshots is not None and times is not None:
+        native = (
+            replace(grid, nz=grid.nz - 1, z0=grid.z0 + grid.dz / 2)
+            if backend == "sbp_sat"
+            else grid
+        )
+        make_wavefield_gif(
+            grid=native,
+            snapshots_vz=snapshots,
+            snapshot_times=times,
+            x_cable=receivers_x,
+            z_cable=receivers_z,
+            metadata=metadata,
+            source=source,
+            out_path=out_dir / "05_wavefield_vz_moment_tensor.gif",
+            plot_x_min_m=left,
+            plot_x_max_m=right,
+            plot_z_min_m=top,
+            plot_z_max_m=bottom,
+            domain_label=label,
+        )
+
+
+def render_saved_forward(out_dir, *, backend, theta_deg, initial_model):
+    """Regenerate only model PNG/GIF from saved arrays; never propagate."""
+    out_dir = Path(out_dir)
+    package_path = out_dir / "outputs_safod_initial_forward.npz"
+    snapshot_path = out_dir / "snapshots_vz.npz"
+    if not snapshot_path.exists():
+        raise FileNotFoundError(
+            f"No saved wavefield snapshots: {snapshot_path}. Rerun forward with --save-gif."
+        )
+    with np.load(package_path, allow_pickle=False) as package:
+        stored_backend = (
+            str(package["solver_backend"].item())
+            if "solver_backend" in package
+            else "numba_fused"
+        )
+        if stored_backend != backend:
+            raise ValueError(
+                "Requested backend differs from the saved forward package."
+            )
+        if str(package["initial_model_name"].item()) != initial_model or not np.isclose(
+            float(package["source_theta_deg"]), theta_deg, rtol=0, atol=1e-9
+        ):
+            raise ValueError(
+                "Requested model/angle differs from the saved forward package."
+            )
+        x, z = package["grid_x"], package["grid_z"]
+        grid = Grid2D(
+            len(x),
+            len(z),
+            float(package["dx"]),
+            float(package["dz"]),
+            int(package["nt"]),
+            float(package["dt"]),
+            float(x[0]),
+            float(z[0]),
+        )
+        np.testing.assert_allclose(grid.x, x, rtol=0, atol=1e-9)
+        np.testing.assert_allclose(grid.z, z, rtol=0, atol=1e-9)
+        model = ElasticModel2D(grid, package["vp"], package["vs"], package["rho"])
+        source = SimpleNamespace(
+            x_embedded_m=float(package["source_x"]),
+            z_embedded_m=float(package["source_z"]),
+        )
+        keys = (
+            "model_type",
+            "x_fault_line",
+            "z_fault_line",
+            "x_tie_m",
+            "z_tie_m",
+            "x_cable_at_tie_m",
+        )
+        metadata = SimpleNamespace(
+            **{
+                k: package[k].item() if package[k].shape == () else package[k]
+                for k in keys
+                if k in package
+            }
+        )
+        receivers_x, receivers_z = package["receiver_x"], package["receiver_z"]
+        free_surface = bool(package["free_surface"])
+    with np.load(snapshot_path, allow_pickle=False) as saved:
+        snapshots, times = saved["snapshots_vz"], saved["snapshot_times_v"]
+        expected_z = grid.z[:-1] + grid.dz / 2 if backend == "sbp_sat" else grid.z
+        np.testing.assert_array_equal(saved["snapshot_grid_x"], grid.x)
+        np.testing.assert_array_equal(saved["snapshot_grid_z"], expected_z)
+        if (
+            snapshots.shape != (len(times), grid.nx, len(expected_z))
+            or not np.isfinite(times).all()
+        ):
+            raise ValueError(
+                "Saved snapshot shape/time axes do not match the native grid."
+            )
+        indices = times / grid.dt - 0.5
+        if (
+            not np.allclose(indices, np.rint(indices), rtol=0, atol=1e-8)
+            or np.any(indices < -1e-8)
+            or np.any(indices > grid.nt - 1 + 1e-8)
+            or np.any(np.diff(times) <= 0)
+        ):
+            raise ValueError(
+                "Saved snapshot times are not valid increasing velocity half steps."
+            )
+    print(
+        f"Rendering saved grid {grid.nx}x{grid.nz}: x=[{x[0]}, {x[-1]}], z=[{z[0]}, {z[-1]}] m"
+    )
+    save_forward_domain_figures(
+        grid,
+        model,
+        source,
+        receivers_x,
+        receivers_z,
+        metadata,
+        snapshots,
+        times,
+        out_dir,
+        backend=backend,
+        free_surface=free_surface,
+    )
+    print("Saved-field rendering PASSED. Forward NPZ and DAS are unchanged.")
 
 
 # ==============================================================================
@@ -1580,6 +1787,17 @@ def parse_args() -> argparse.Namespace:
             "effective 2D double-couple orientation."
         )
     )
+
+    parser.add_argument("--backend", choices=FORWARD_BACKENDS, default="numba_fused",
+                        help="Elastic solver. sbp_sat uses bounded 4-2 SBP/SAT and impedance faces.")
+    parser.add_argument("--sbp-execution", choices=("numba","csr"),default="numba",
+                        help="SBP implementation: compiled Numba (default) or independent CSR reference. Same mathematics and output directory.")
+    parser.add_argument("--duration-s", type=float, default=None,
+                        help="Minimum (nt-1)*dt duration. For SBP, omitted duration is preserved from the legacy grid, with nt increased if dt must shrink.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate model, source, receivers, duration and SBP CFL; print storage, then stop before wave propagation.")
+    parser.add_argument("--render-only", action="store_true",
+                        help="Regenerate full-domain model PNG/GIF from existing NPZ and snapshots; skip propagation.")
 
     parser.add_argument(
         "--theta-deg",
@@ -1662,7 +1880,15 @@ def main() -> None:
             "2D double-couple parameterisation."
         )
 
-    run_tag = forward_run_tag(args.theta_deg)
+    run_tag = forward_run_tag(args.theta_deg, args.backend)
+    if args.render_only:
+        if args.dry_run or not args.save_gif:
+            raise ValueError("--render-only requires GIF rendering and cannot be combined with --dry-run.")
+        render_saved_forward(
+            forward_dir_for_theta(args.theta_deg, args.backend) / args.initial_model,
+            backend=args.backend, theta_deg=args.theta_deg, initial_model=args.initial_model,
+        )
+        return
     # --------------------------------------------------------------------------
     # Run mode
     # --------------------------------------------------------------------------
@@ -1679,7 +1905,7 @@ def main() -> None:
         geom_file = event_cfg["geom_file"]
         # geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
         out_dir = (
-            forward_dir_for_theta(args.theta_deg)
+            forward_dir_for_theta(args.theta_deg, args.backend)
             / args.initial_model
         )
     elif source_mode == "deep_saf":
@@ -1694,7 +1920,7 @@ def main() -> None:
         out_dir / "outputs_safod_initial_forward.npz"
     )
 
-    if output_package.exists() and not args.overwrite:
+    if output_package.exists() and not args.overwrite and not args.dry_run:
         raise FileExistsError(
             f"Forward package already exists: {output_package}\n"
             "Use --overwrite only when replacement is intentional."
@@ -1703,6 +1929,9 @@ def main() -> None:
     print("\nRun identity")
     print("------------")
     print(f"run tag       : {run_tag}")
+    print(f"solver backend: {args.backend}")
+    if args.backend == "sbp_sat":
+        print(f"SBP execution : {args.sbp_execution}")
     print(f"theta         : {args.theta_deg:.1f} deg")
     print(f"initial model : {args.initial_model}")
     print(f"save GIF      : {args.save_gif}")
@@ -1726,50 +1955,60 @@ def main() -> None:
 
     half_order = 2
 
-    # Boundary configuration selected by the controlled homogeneous sweep.
-    n_boundary = 120
+    # The legacy sponge parameters do not configure the SBP boundary law.
+    n_boundary = 0 if args.backend == "sbp_sat" else FORWARD_PADDING_CELLS
     gamma_s = 80.0
     free_surface = True
 
     # --------------------------------------------------------------------------
-    # Scientific and computational domains
+    # One explicit SBP domain; retain the legacy sponge layout for that backend.
     # --------------------------------------------------------------------------
-    # Geological/interpreted model ends at 5 km.
-    # The bottom absorbing sponge is appended outside this domain.
-    scientific_z_max_m = 5000.0
-
     sponge_width_x_m = n_boundary * dx
     sponge_width_z_m = n_boundary * dz
 
-    scientific_x_min_m = SAFOD_SCIENTIFIC_X_MIN_M
-    scientific_x_max_m = SAFOD_SCIENTIFIC_X_MAX_M
-
-    computational_x_min_m = (
-        scientific_x_min_m
-        - sponge_width_x_m
-    )
-    computational_x_max_m = (
-        scientific_x_max_m
-        + sponge_width_x_m
-    )
-
-    computational_z_max_m = (
-        scientific_z_max_m
-        + sponge_width_z_m
-    )
-
-    print(f"side sponge width          : {sponge_width_x_m:.1f} m")
-    print(f"bottom sponge width        : {sponge_width_z_m:.1f} m")
-    print(
-        "scientific x              : "
-        f"{scientific_x_min_m:.1f} to {scientific_x_max_m:.1f} m"
-    )
-    print(
-        "computational x           : "
-        f"{computational_x_min_m:.1f} to {computational_x_max_m:.1f} m"
-    )
-    print(f"scientific model bottom    : {scientific_z_max_m:.1f} m")
-    print(f"computational grid bottom  : {computational_z_max_m:.1f} m")
+    if args.backend == "sbp_sat":
+        computational_x_min_m = float(SBP_X_MIN_M)
+        computational_x_max_m = float(SBP_X_MAX_M)
+        computational_z_max_m = float(SBP_Z_MAX_M)
+        if not np.isfinite(
+            [computational_x_min_m, computational_x_max_m, computational_z_max_m]
+        ).all():
+            raise ValueError("SBP domain bounds must be finite.")
+        if computational_x_min_m >= computational_x_max_m or computational_z_max_m <= 0:
+            raise ValueError("SBP domain bounds must be increasing, with bottom > 0.")
+        for length, spacing in (
+            (computational_x_max_m - computational_x_min_m, dx),
+            (computational_z_max_m, dz),
+        ):
+            if not np.isclose(
+                length / spacing, round(length / spacing), rtol=0, atol=1e-9
+            ):
+                raise ValueError(
+                    "Chosen SBP domain lengths must be multiples of grid spacing."
+                )
+        # Compatibility fields for old package readers; these now alias the
+        # actual domain. They no longer define a second region in SBP.
+        scientific_x_min_m = computational_x_min_m
+        scientific_x_max_m = computational_x_max_m
+        scientific_z_max_m = computational_z_max_m
+        print("Chosen SBP domain (no appended cells)")
+        print(f"x bounds: {computational_x_min_m:.1f} to {computational_x_max_m:.1f} m")
+        print(f"z bounds: 0.0 to {computational_z_max_m:.1f} m")
+    else:
+        scientific_x_min_m = SAFOD_SCIENTIFIC_X_MIN_M
+        scientific_x_max_m = SAFOD_SCIENTIFIC_X_MAX_M
+        scientific_z_max_m = 5000.0
+        computational_x_min_m = scientific_x_min_m - sponge_width_x_m
+        computational_x_max_m = scientific_x_max_m + sponge_width_x_m
+        computational_z_max_m = scientific_z_max_m + sponge_width_z_m
+        print(f"side sponge width: {sponge_width_x_m:.1f} m")
+        print(f"bottom sponge width: {sponge_width_z_m:.1f} m")
+        print(f"scientific x: {scientific_x_min_m:.1f} to {scientific_x_max_m:.1f} m")
+        print(
+            f"computational x: {computational_x_min_m:.1f} to {computational_x_max_m:.1f} m"
+        )
+        print(f"scientific model bottom: {scientific_z_max_m:.1f} m")
+        print(f"computational grid bottom: {computational_z_max_m:.1f} m")
 
     if source_mode == "catalog_event":
         # Use the actual acquisition parameters of the selected real event.
@@ -1788,7 +2027,7 @@ def main() -> None:
         event_id_for_title = "deep_saf"
 
     # --------------------------------------------------------------------------
-    # 1. Build extended SAFOD initial model
+    # 1. Build the SAFOD initial model on the requested grid.
     # --------------------------------------------------------------------------
 
     if source_mode == "catalog_event":
@@ -1867,6 +2106,19 @@ def main() -> None:
         )
     )
 
+    if args.backend == "sbp_sat":
+        from src.sbp_sat.simulator import configure_time_grid
+        model, timing = configure_time_grid(model, duration_s=args.duration_s)
+        grid = model.grid
+        print("\nSBP-SAT time grid (source is built afterward)")
+        print(timing)
+        print("Sides/bottom: first-order impedance SAT at the chosen outer faces; no PML yet.")
+    elif args.duration_s is not None:
+        if not np.isfinite(args.duration_s) or args.duration_s <= 0:
+            raise ValueError("--duration-s must be finite and positive.")
+        grid = replace(grid, nt=max(2, int(np.ceil(args.duration_s / grid.dt)) + 1))
+        model = replace(model, grid=grid)
+
     expected_bottom_tolerance_m = 0.51 * dz
 
     if (
@@ -1918,10 +2170,8 @@ def main() -> None:
     print(f"SAF tie    : x={metadata.x_tie_m:.1f} m, z={metadata.z_tie_m:.1f} m")
     print(f"GL         : {gauge_length_m:.4f} m")
     print(f"receiver ds: {channel_spacing_m:.2f} m")
-    print(
-        "scientific x: "
-        f"{scientific_x_min_m:.1f} to {scientific_x_max_m:.1f} m"
-    )
+    print(f"model x: {grid.x[0]:.1f} to {grid.x[-1]:.1f} m")
+    print(f"model z: {grid.z[0]:.1f} to {grid.z[-1]:.1f} m")
 
     # --------------------------------------------------------------------------
     # 2. Trim cable and build DAS receivers
@@ -2221,20 +2471,24 @@ def main() -> None:
         and float(grid.z[0]) <= z_src <= scientific_z_max_m
     ):
         raise ValueError(
-            "Source lies outside the scientific model domain: "
+            "Source lies outside the chosen model domain: "
             f"source=({x_src:.1f}, {z_src:.1f}) m, "
             f"x=[{scientific_x_min_m:.1f}, {scientific_x_max_m:.1f}] m, "
             f"z=[{grid.z[0]:.1f}, {scientific_z_max_m:.1f}] m. "
-            "Sources must not be placed inside the absorbing sponge."
+            "The source must lie inside the chosen model domain."
         )
 
-    check_source_inside_solver_domain(
-        grid=grid,
-        x_src=x_src,
-        z_src=z_src,
-        n_boundary=n_boundary,
-        half_order=half_order,
-    )
+    if args.backend != "sbp_sat":
+        check_source_inside_solver_domain(
+            grid=grid,
+            x_src=x_src,
+            z_src=z_src,
+            n_boundary=n_boundary,
+            half_order=half_order,
+        )
+    elif not (grid.x[0] + grid.dx / 2 <= x_src <= grid.x[-1] - grid.dx / 2
+              and grid.z[0] + grid.dz / 2 <= z_src <= grid.z[-1] - grid.dz / 2):
+        raise ValueError("Source is outside common SBP stress-grid support; no clipping.")
 
     source = build_dc_source(
         grid=grid,
@@ -2273,7 +2527,8 @@ def main() -> None:
 
     check_record_duration(
         grid=grid,
-        max_s_arrival_s=max_s_arrival_s,
+        max_s_arrival_s=(max_s_arrival_s + source.stf.t0
+                         if args.backend == "sbp_sat" else max_s_arrival_s),
         min_tail_after_s_s=0.50,
     )
 
@@ -2290,65 +2545,30 @@ def main() -> None:
         f"{arrivals_receiver['S'].max():.3f} s"
     )
 
+    snapshot_stride = 300 if args.save_gif else None
+    if args.backend == "sbp_sat":
+        from src.sbp_sat.simulator import estimate_storage, prepare_simulation
+        print("\nSBP-SAT storage estimate (GiB; array estimate, not measured RSS)")
+        print(estimate_storage(grid, receivers.nrec, snapshot_stride))
+        if args.dry_run:
+            prepare_simulation(model, source, receivers, gauge_length_m,
+                               free_surface=free_surface,execution=args.sbp_execution)
+    if args.dry_run:
+        print("Preflight PASSED. No wave propagation performed.")
+        return
+
     # --------------------------------------------------------------------------
     # 5. Save model plot with source overlay
     # --------------------------------------------------------------------------
-    fig, ax = plot_safod_model(
-        grid=grid,
-        model=model,
-        x_cable=x_cable_use,
-        z_cable=z_cable_use,
-        metadata=metadata,
-        field="vp",
-        show_fault=True,
-        show_tie_point=True,
-        show_offset_segment=True,
+    save_forward_domain_figures(
+        grid, model, source, x_cable_use, z_cable_use, metadata,
+        None, None, out_dir, backend=args.backend,
+        free_surface=free_surface,
     )
-
-    ax.scatter(
-        [source.x_embedded_m],
-        [source.z_embedded_m],
-        marker="*",
-        s=150,
-        c="yellow",
-        edgecolors="black",
-        zorder=20,
-        label="Source",
-    )
-
-    # Re-place the legend using the same robust figure-fraction coordinates
-    # as plot_safod_model. Do NOT call fig.tight_layout() after this — it
-    # would undo the reserved right margin and re-overlap the colorbar.
-    place_safod_legend(fig, ax, fontsize=8)
-
-    # Show only the scientific domain. The numerical side and bottom sponge
-    # remain in the solver arrays but are not presented as geology.
-    ax.set_xlim(
-        scientific_x_min_m,
-        scientific_x_max_m,
-    )
-    ax.set_ylim(
-        scientific_z_max_m,
-        float(grid.z[0]),
-    )
-
-    style_figure_text_bold(
-        fig,
-        main_axis=ax,
-    )
-
-    fig.savefig(
-        out_dir / "01_model_vp_with_source.png",
-        dpi=220,
-        bbox_inches="tight",
-    )
-    plt.close(fig)
 
     # --------------------------------------------------------------------------
     # 6. Run forward simulation
     # --------------------------------------------------------------------------
-    snapshot_stride = 300 if args.save_gif else None
-
     print("\nRunning forward simulation...")
     print(f"snapshot stride: {snapshot_stride}")
     run_result, das_result = run_forward_simulation(
@@ -2361,8 +2581,9 @@ def main() -> None:
         n_boundary=n_boundary,
         gamma_s=gamma_s,
         snapshot_stride=snapshot_stride,
-        backend="numba_fused",
+        backend=args.backend,
         free_surface=free_surface,
+        sbp_execution=args.sbp_execution,
     )
     print("Forward simulation finished.")
 
@@ -2370,8 +2591,10 @@ def main() -> None:
     # 6b. Wavefield propagation GIF
     # --------------------------------------------------------------------------
     if run_result.snapshots_vz is not None and run_result.snapshot_times_v is not None:
+        snapshot_grid = (replace(grid, nz=grid.nz - 1, z0=grid.z0 + grid.dz / 2)
+                         if args.backend == "sbp_sat" else grid)
         make_wavefield_gif(
-            grid=grid,
+            grid=snapshot_grid,
             snapshots_vz=run_result.snapshots_vz,
             snapshot_times=run_result.snapshot_times_v,
             x_cable=x_cable_use,
@@ -2379,9 +2602,11 @@ def main() -> None:
             metadata=metadata,
             source=source,
             out_path=out_dir / "05_wavefield_vz_moment_tensor.gif",
-            plot_x_min_m=scientific_x_min_m,
-            plot_x_max_m=scientific_x_max_m,
-            plot_z_max_m=scientific_z_max_m,
+            plot_x_min_m=float(grid.x[0]),
+            plot_x_max_m=float(grid.x[-1]),
+            plot_z_min_m=float(grid.z[0]),
+            plot_z_max_m=float(grid.z[-1]),
+            domain_label=forward_domain_label(args.backend, free_surface),
             fps=6,
             max_frames=80,
             percentile_clip=99.5,
@@ -2520,6 +2745,8 @@ def main() -> None:
     np.savez_compressed(
         output_package,
 
+        **(run_result.solver_metadata or {"solver_backend": args.backend}),
+
         t=run_result.t,
         t_sigma=run_result.t_sigma,
 
@@ -2614,22 +2841,28 @@ def main() -> None:
         initial_model_name=np.array(
             args.initial_model
         ),
-        n_boundary=np.array(n_boundary),
-        gamma_s=np.array(gamma_s),
+        n_boundary=np.array(n_boundary if args.backend != "sbp_sat" else 0),
+        gamma_s=np.array(gamma_s if args.backend != "sbp_sat" else 0.0),
+        material_padding_cells=np.array(n_boundary),
         free_surface=np.array(free_surface),
         # Retain legacy keys for readers of older result packages. Padding is
         # asymmetric under explicit bounds, so no single scalar applies.
         extra_scientific_x_margin_m=np.array(np.nan),
         x_padding_m=np.array(np.nan),
-        x_domain_mode=np.array("explicit_scientific_bounds"),
+        x_domain_mode=np.array(
+            "explicit_computational_bounds" if args.backend == "sbp_sat"
+            else "explicit_scientific_bounds"
+        ),
         scientific_x_min_m=np.array(scientific_x_min_m),
         scientific_x_max_m=np.array(scientific_x_max_m),
         computational_x_min_m=np.array(computational_x_min_m),
         computational_x_max_m=np.array(computational_x_max_m),
         scientific_z_max_m=np.array(scientific_z_max_m),
         computational_z_max_m=np.array(computational_z_max_m),
-        sponge_width_x_m=np.array(sponge_width_x_m),
-        sponge_width_z_m=np.array(sponge_width_z_m),
+        sponge_width_x_m=np.array(sponge_width_x_m if args.backend != "sbp_sat" else 0.0),
+        sponge_width_z_m=np.array(sponge_width_z_m if args.backend != "sbp_sat" else 0.0),
+        material_padding_width_x_m=np.array(sponge_width_x_m),
+        material_padding_width_z_m=np.array(sponge_width_z_m),
 
         grid_x=grid.x,
         grid_z=grid.z,
@@ -2657,6 +2890,9 @@ def main() -> None:
             out_dir / "snapshots_vz.npz",
             snapshots_vz=run_result.snapshots_vz,
             snapshot_times_v=run_result.snapshot_times_v,
+            snapshot_grid_x=grid.x,
+            snapshot_grid_z=(grid.z[:-1] + grid.dz / 2
+                             if args.backend == "sbp_sat" else grid.z),
         )
 
     print(f"\nSaved results to: {out_dir.absolute()}")

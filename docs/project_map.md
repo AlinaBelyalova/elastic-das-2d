@@ -22,7 +22,11 @@ A short description of the packages is in the `src/__init__.py` docstring.
 | DAS observation operator | `src/das/strain.py`: axial strain and strain rate over a finite gauge length, adjoint operator |
 | Analytical references | `src/analytical/`: `pointforce_2d.py` (2-D point force), `moment_tensor.py` (moment tensor) |
 | Legacy-solver FWI | `src/fwi/`: `two_layer.py` (two-layer setup and Numba forward), `adjoint_numba.py` (exact discrete adjoint of the Numba solver), `gradient_numba.py` (gradient with checkpointing), `misfit.py` (DAS L2 misfit; not yet used in `gradient_numba.py`) |
-| SBP-SAT | `src/sbp_sat/`: `operators.py` (1-D SBP operators on a staggered grid, 4th order in the interior, 2nd at the boundary), `elastic2d.py` (2-D forward, adjoint, gradient with respect to log Vp / log Vs); formulas: [method.md](sbp_sat/method.md) |
+| SBP-SAT | `src/sbp_sat/`: `operators.py` (1-D staggered SBP 4-2), `boundaries.py` (SAT and transpose), `stability.py` (sufficient timestep bound), `observations.py` (off-grid finite-gauge DAS and transpose), `elastic2d.py` (forward, adjoint, log Vp / log Vs gradient); [method](sbp_sat/method.md), [integration](sbp_sat/integration.md) |
+| Bounded SBP-SAT | `src/sbp_sat/rectangular.py`: two bounded axes, free/impedance faces, energy-dissipative step, exact transpose and full material gradient; `rectangular_observations.py`: bounded DAS sampling without wrap; [derivation](sbp_sat/absorbing.md) |
+| SBP-SAT event backend | `src/sbp_sat/sources.py`: off-grid moment source and transpose; `simulator.py`: existing source/model/receiver APIs and CSR forward/adjoint/gradient; `run_forward` and `compare_event --backend sbp_sat`; [runbook](sbp_sat/pipeline.md) |
+| Compiled SBP-SAT | `src/sbp_sat/numba_solver.py`: reusable workspace and fused float64 kernels; `scripts/benchmarks/sbp_sat.py`: CSR parity/timing; `scripts/safod/run_forward_sbp_sat.sbatch`: four-CPU event job; [execution](sbp_sat/numba.md) |
+| SBP-SAT gradient memory | `src/sbp_sat/checkpointing.py`: uniform full-state checkpoints and exact forward replay; `scripts/validation/sbp_sat/checkpoint_qc.py`: full-history parity and Taylor check; [memory and indexing](sbp_sat/checkpointing.md) |
 | SAFOD velocity models | `src/safod/models/`: `factory.py` (`build_initial_model` by name; list of names: `AVAILABLE_INITIAL_MODELS`) and one module per model |
 | SAFOD model figures | `src/safod/plotting.py` |
 | SAFOD predicted P/S | `src/safod/travel_times.py`: Zhang 2009 3-D, then original Lin 2010 on coverage errors (`src/safod/lin2010.py`), through EikoHypoTomo; one shared 3-D reference for real and synthetic comparison panels; [runbook](safod/travel_times.md) |
@@ -38,7 +42,7 @@ Always run from the project root; the full table of checks with criteria:
 
 | Task | Location |
 | --- | --- |
-| SBP-SAT checks | `scripts/validation/sbp_sat/`: `operator_qc`, `adjoint_dot_product`, `taylor`, `normal_incidence_qc`, `oblique_qc`, `time_energy_qc`; commands only in [validation.md](sbp_sat/validation.md) |
+| SBP-SAT checks | `scripts/validation/sbp_sat/`: `operator_qc`, `adjoint_dot_product`, `taylor`, `normal_incidence_qc`, `oblique_qc`, `time_energy_qc`, `das_chain_qc`, `absorbing_qc`; commands only in [validation.md](sbp_sat/validation.md) |
 | Legacy-solver checks | `scripts/validation/elastic/`: `pointforce_2d`, `reciprocity`, `source_radiation`, `moment_tensor_analytical`, `moment_tensor_linearity`, `magnitude_scaling`, `boundary_absorption`, `free_surface_normal_incidence_qc`, `free_surface_graves_fs1_qc` |
 | FWI checks | `scripts/validation/fwi/`: `two_layer_numba`, `two_layer_adjoint_dot_product`, `two_layer_taylor` |
 | Demo run | `scripts/examples/homogeneous_demo.py` |
@@ -75,3 +79,7 @@ flowchart LR
     TEST["tests and scripts/validation"] --> CORE
     NOTE["notebooks: exploration"] --> CORE
 ```
+
+## Catalog-wide geophone comparison
+
+Configuration: `config/safod_deep/geophone_comparison.json`. Entry point: `scripts/safod_deep/compare_geophones.py`; shared processing/I/O/plotting: `src/safod_deep/geophone_*.py`. The site publishes canonical batch products only. Commands, conventions and result layout: [runbook](safod/geophone_comparison.md).
