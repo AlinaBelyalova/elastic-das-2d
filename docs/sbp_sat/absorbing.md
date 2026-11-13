@@ -1,5 +1,9 @@
 # Bounded SBP-SAT and dissipative impedance boundaries
 
+The equations below describe the retained impedance-only core/reference.
+The event driver now restores the legacy-style Gaussian sponge inside the
+same domain; its additional step/transpose/energy scope is in [sponge.md](sponge.md).
+
 This is an additive NumPy reference after the [DAS core](integration.md),
 not a replacement of `scripts.safod.run_forward`. It uses the same isotropic
 equations, SI units, positive-down z, arithmetic material transfer,

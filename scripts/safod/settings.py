@@ -49,7 +49,7 @@ from src.safod.reference import (
 
 # Inner model bounds in the canonical along-profile coordinate.
 # run_forward appends a material buffer. The legacy solver damps that buffer;
-# SBP uses ordinary material there and impedance SATs at the outer faces.
+# SBP has its own explicit full domain and sponge widths below.
 SAFOD_SCIENTIFIC_X_MIN_M = -1500.0
 SAFOD_SCIENTIFIC_X_MAX_M = 3500.0
 
@@ -59,6 +59,8 @@ SAFOD_SCIENTIFIC_X_MAX_M = 3500.0
 SBP_X_MIN_M = -2100.0
 SBP_X_MAX_M = 4100.0
 SBP_Z_MAX_M = 5600.0  # flat free surface is z=0
+SBP_SPONGE_WIDTH_M = 600.0  # inside the bounds, never appended to the grid
+SBP_SPONGE_RATE_PER_S = 80.0  # same quadratic Gaussian law as the legacy run
 
 DAS_UTILITIES_ROOT = Path(
     "/home/groups/ettore88/alina/packages/DAS-utilities"
@@ -269,6 +271,29 @@ FILTER_TAPER_FRAC = 0.05
 # ==============================================================================
 
 DEFAULT_THETA_DEG = 35.0
+FOCAL_MECHANISM_CATALOG = Path("results/safod_deep/catalog/focal_mechanisms.json")
+
+
+def add_source_mechanism_arguments(parser):
+    mechanism = parser.add_mutually_exclusive_group()
+    mechanism.add_argument(
+        "--theta-deg", type=float,
+        help=f"Trial 2D double-couple angle (0 <= theta < 90; default {DEFAULT_THETA_DEG:g}).",
+    )
+    mechanism.add_argument(
+        "--comcat-mechanism", action="store_true",
+        help="Use the 2D projection of the ComCat focal mechanism.",
+    )
+
+
+def parse_source_mechanism_arguments(parser):
+    args = parser.parse_args()
+    if not args.comcat_mechanism:
+        if args.theta_deg is None:
+            args.theta_deg = DEFAULT_THETA_DEG
+        if not 0.0 <= args.theta_deg < 90.0:
+            parser.error("--theta-deg must satisfy 0 <= theta < 90.")
+    return args
 FORWARD_BASE_TAG = "n120_g80_xplus500"
 
 
@@ -309,16 +334,14 @@ def _check_forward_backend(backend: str) -> None:
         raise ValueError(f"Unknown SAFOD backend: {backend!r}.")
 
 
-def forward_run_tag(theta_deg: float, backend: str = "numba_fused") -> str:
+def forward_run_tag(theta_deg: float | None, backend: str = "numba_fused") -> str:
     _check_forward_backend(backend)
+    source_tag = "comcat" if theta_deg is None else f"dc{format_theta_tag(theta_deg)}"
     if backend == "sbp_sat":
         # Historical file identity, retained so saved impedance runs remain
         # readable. The literal pad120 is NOT used to build the SBP domain.
-        return f"sbp_sat_4_2_pad120_dc{format_theta_tag(theta_deg)}"
-    return (
-        f"{FORWARD_BASE_TAG}_dc"
-        f"{format_theta_tag(theta_deg)}"
-    )
+        return f"sbp_sat_4_2_pad120_{source_tag}"
+    return f"{FORWARD_BASE_TAG}_{source_tag}"
 
 
 
@@ -358,7 +381,10 @@ FORWARD_EVENT_DIR = EVENT_RESULTS_DIR / "forward"
 COMPARISON_EVENT_DIR = EVENT_RESULTS_DIR / "compare"
 
 
-def theta_dir_name(theta_deg: float) -> str:
+def theta_dir_name(theta_deg: float | None) -> str:
+    """Legacy angle directory, or a distinct ComCat directory when theta is absent."""
+    if theta_deg is None:
+        return "comcat"
     theta_int = int(round(float(theta_deg)))
 
     if abs(float(theta_deg) - float(theta_int)) > 1.0e-9:
@@ -370,20 +396,20 @@ def theta_dir_name(theta_deg: float) -> str:
     return f"dc{theta_int:03d}"
 
 
-def forward_dir_for_theta(theta_deg: float, backend: str = "numba_fused") -> Path:
+def forward_dir_for_theta(theta_deg: float | None, backend: str = "numba_fused") -> Path:
     _check_forward_backend(backend)
     root = FORWARD_EVENT_DIR if backend == "numba_fused" else FORWARD_EVENT_DIR / backend
     return root / theta_dir_name(theta_deg)
 
 
-def forward_package_for_theta(theta_deg: float, backend: str = "numba_fused") -> Path:
+def forward_package_for_theta(theta_deg: float | None, backend: str = "numba_fused") -> Path:
     return (
         forward_dir_for_theta(theta_deg, backend)
         / "outputs_safod_initial_forward.npz"
     )
 
 
-def comparison_dir_for_theta(theta_deg: float, backend: str = "numba_fused") -> Path:
+def comparison_dir_for_theta(theta_deg: float | None, backend: str = "numba_fused") -> Path:
     _check_forward_backend(backend)
     root = COMPARISON_EVENT_DIR if backend == "numba_fused" else COMPARISON_EVENT_DIR / backend
     return root / theta_dir_name(theta_deg)

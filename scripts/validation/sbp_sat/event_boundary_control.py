@@ -73,6 +73,9 @@ def relative_error(value, reference):
 
 def load_reference(path):
     with np.load(path, allow_pickle=False) as package:
+        if "sponge_rate_per_s" in package.files and float(package["sponge_rate_per_s"]) != 0:
+            raise ValueError("This historical impedance-only control cannot replay a sponge run. "
+                             "Use the sponge validation; no automatic grid extension.")
         missing = set(REFERENCE_KEYS) - set(package.files)
         if missing:
             raise ValueError(f"Reference lacks required provenance: {sorted(missing)}")

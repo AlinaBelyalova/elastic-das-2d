@@ -19,15 +19,17 @@ and `SBP_Z_MAX_M` in `scripts/safod/settings.py`; the top is z=0. No cells
 are appended. Defaults preserve the previous actual grid: x=-2100..4100 m,
 z=0..5600 m, dx=dz=5 m, 1241x1121 material nodes. Legacy sponge constants
 do not define this grid. Model interpolation/extension rules are unchanged.
-Saved `n_boundary`, `gamma_s`, `sponge_width_*` and `material_padding_*`
-are zero. Legacy `scientific_*` keys alias these same actual bounds;
+The event driver restores a 600 m Gaussian sponge with rate 80 1/s inside
+the chosen sides/bottom. Saved `n_boundary/gamma_s` are 120/80,
+`sponge_width_*` are 600 m, and `material_padding_*` remain zero. Legacy `scientific_*` keys alias these same actual bounds;
 they do not describe a second region. Registered coordinates are unchanged;
 the driver still reports its retained channel mask and shallow cutoff.
 
 The top is traction-free; first-order impedance SATs act at the actual
-sides/bottom. There is no sponge or PML in the current SBP engine. The
-boundary-law limitation and next implementation gates are specified in
-[boundary_plan.md](boundary_plan.md). Do not interpret a passing energy
+sides/bottom. A native-grid Gaussian sponge now attenuates waves before
+they reach those outer faces. There is no PML. Its exact discrete reverse,
+first-order time splitting in the strips and measured limitations are in
+[sponge.md](sponge.md). The earlier PML proposal is deferred. Do not interpret a passing energy
 or adjoint check as a measurement of low oblique reflection.
 
 The source reuses the existing rotated 2-D tensor and `ricker_moment`
@@ -82,17 +84,20 @@ forward package. The estimate excludes Python/plotting/external inputs and
 is not measured peak RSS. Native Vz snapshots use x=grid.x and
 z=grid.z[:-1]+dz/2; the saved axes and GIF use those coordinates directly.
 
-Model Vp and wavefield GIF now show the full computational domain, matching
-the actual saved `grid_x/grid_z`. For the default event this is x=-2100..4100 m,
-z=0..5600 m, dx=dz=5 m, 1241x1121 material nodes. The previous display was
-cropped to x=-1500..3500 m, z=0..5000 m. That crop is no longer used for SBP
-rendering and no inner reference rectangle is drawn. The outer sides/bottom
-carry impedance SATs.
+The full computational arrays are saved at x=-2100..4100 m, z=0..5600 m,
+dx=dz=5 m, 1241x1121 material nodes. Model Vp and wavefield GIF now hide the
+actual absorbing strips, giving x=-1500..3500 m, z=0..5000 m at the default
+600 m widths. No strip shading, reference rectangle or boundary-law caption
+is drawn. Plotting does not resize the grid or rescale data coordinates.
 
 Vz samples remain on their native half-depth nodes (1241x1120 in this case).
 Pixel centres match those coordinates, and pixel edges/axes display the
 physical 0/5600 m domain endpoints without interpolating boundary values.
-The fixed colour scale uses the complete displayed region across frames.
+The fixed GIF colour scale uses only pixels with positive overlap with the
+displayed region across frames, excluding hidden absorbing rows. Saved
+rerendering reads widths and rate from the NPZ. Historical impedance-only
+packages have no active sponge and keep their full view; stale `scientific_*`
+aliases and current settings do not override the saved absorber provenance.
 Default grid/materials, source/STF, DAS observable, dt and checkpoint
 equations are preserved. Explicitly changing the chosen domain can change
 retained receiver support; that mask is reported, never coordinate-clipped.
@@ -177,7 +182,9 @@ distributed source and DAS observation for `run_adjoint_to_source`.
 `objective_and_gradient_log_vp_vs` in that module accepts the existing
 model/source/receiver objects and observed DAS. It differentiates
 `J=0.5*dt*sum((predicted-observed)^2)` at fixed rho, dt, source and geometry,
-including impedance derivatives. During optimization, keep dt fixed and
+including impedance derivatives. For sponge data pass the same explicit
+`GaussianSponge` to forward and gradient preparation; widths/rate are fixed
+numerical parameters. During optimization, keep dt fixed and
 check its certificate for each model. Do not differentiate automatic dt/nt
 selection or change observed-data length.
 

@@ -15,12 +15,16 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 export NUMBA_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 export SAFOD_EVENT_KEY="${SAFOD_EVENT_KEY:-nc75379261}"
 SBP_MODEL="${SAFOD_MODEL:-hybrid_zhang2009_boness2006_bill_logs}"
-SBP_THETA="${SAFOD_THETA_DEG:-35}"
+case "${SAFOD_SOURCE_MECHANISM:-manual}" in
+  manual) SOURCE_ARGS=(--theta-deg "${SAFOD_THETA_DEG:-35}") ;;
+  comcat) SOURCE_ARGS=(--comcat-mechanism) ;;
+  *) echo "SAFOD_SOURCE_MECHANISM must be manual or comcat." >&2; exit 2 ;;
+esac
 SBP_FWI_PYTHON=/home/groups/ettore88/alina/.envs/fwi/bin/python
 SBP_GEO_PYTHON=/home/groups/ettore88/alina/.envs/geo/bin/python
 
 "$SBP_FWI_PYTHON" -u -m scripts.safod.run_forward \
-  --backend sbp_sat --sbp-execution numba --theta-deg "$SBP_THETA" \
+  --backend sbp_sat --sbp-execution numba "${SOURCE_ARGS[@]}" \
   --initial-model "$SBP_MODEL" --duration-s 3 "$@"
 "$SBP_GEO_PYTHON" -u -m scripts.safod.compare_event \
-  --backend sbp_sat --theta-deg "$SBP_THETA" --initial-model "$SBP_MODEL"
+  --backend sbp_sat "${SOURCE_ARGS[@]}" --initial-model "$SBP_MODEL"

@@ -31,6 +31,7 @@ def run_forward_simulation(
     backend: str = "numba_fused",
     free_surface: bool = False,
     sbp_execution: str = "numba",
+    sbp_sponge=None,
 ) -> tuple[ElasticRunResult, DASResult]:
     """
     Run the full elastic forward simulation and post-process into DAS strain-rate.
@@ -68,6 +69,9 @@ def run_forward_simulation(
     sbp_execution : str
         For backend="sbp_sat", use compiled "numba" (default) or the
         independent "csr" reference. Other backends are unchanged.
+    sbp_sponge : GaussianSponge or None
+        Explicit SBP absorbing strips inside the supplied grid. None retains
+        the impedance-only reference. No grid padding is added here.
     """
     grid = model.grid
 
@@ -79,7 +83,7 @@ def run_forward_simulation(
         from src.sbp_sat.simulator import run_forward_simulation as run_sbp
         return run_sbp(model, source, receivers, gauge_length_m,
                        snapshot_stride=snapshot_stride, free_surface=free_surface,
-                       execution=sbp_execution)
+                       execution=sbp_execution, sponge=sbp_sponge)
 
     if source.stf.nt != grid.nt:
         raise ValueError(

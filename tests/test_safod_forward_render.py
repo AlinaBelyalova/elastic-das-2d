@@ -1,4 +1,4 @@
-"""Saved-array rendering: full domain, staggered coordinates, no propagation."""
+"""Saved-array rendering: hide actual sponge strips, preserve native coordinates."""
 
 import matplotlib
 
@@ -94,7 +94,7 @@ def test_render_only_preserves_arrays_and_full_domain_native_alignment(
         assert ax.get_xlim() == (grid.x[0], grid.x[-1])
         assert ax.get_ylim() == (grid.z[-1], grid.z[0])
         assert len(ax.patches) == 0
-        assert "Full computational domain" in ax.get_title()
+        assert ax.get_title() == "SAFOD model"
     model_image = figures[0].axes[0].images[0]
     gif_image = figures[1].axes[0].images[0]
     np.testing.assert_array_equal(model_image.get_array(), values["vp"].T)
@@ -160,3 +160,88 @@ def test_missing_snapshots_gives_rerun_instruction(tmp_path):
         driver.render_saved_forward(
             tmp_path, backend="sbp_sat", theta_deg=35, initial_model="bill_logs"
         )
+
+
+@pytest.mark.parametrize("profile_keys", ["canonical", "legacy"])
+def test_render_hides_saved_sponge_without_changing_grid_data_or_pixel_centres(
+    tmp_path, monkeypatch, profile_keys
+):
+    root = tmp_path / "sponge"
+    grid, values, snapshots = saved_case(root)
+    if profile_keys == "canonical":
+        values.update(sponge_rate_per_s=80., sponge_side_width_m=10.,
+                      sponge_bottom_width_m=21.)
+    else:
+        values.update(gamma_s=80., sponge_width_x_m=10., sponge_width_z_m=21.)
+    # Deliberately wrong historical display aliases and current configuration
+    # must not define this saved run's window.
+    values.update(scientific_x_min_m=-999., scientific_x_max_m=999.,
+                  scientific_z_max_m=999.)
+    monkeypatch.setattr(driver, "SBP_SPONGE_WIDTH_M", 10000.)
+    raw = snapshots["snapshots_vz"]
+    raw[:, :2, :] = 1e12
+    raw[:, -2:, :] = 1e12
+    raw[:, :, 11:] = 1e12  # the first such Vz pixel only touches z=87
+    np.savez_compressed(root / "outputs_safod_initial_forward.npz", **values)
+    np.savez_compressed(root / "snapshots_vz.npz", **snapshots)
+    before = {p.name: p.read_bytes() for p in root.glob("*.npz")}
+    figures = []
+    close = plt.close
+    def record(fig=None):
+        if hasattr(fig, "axes"):
+            figures.append(fig)
+        close(fig)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Display-only work attempted to rebuild/run the model")
+    monkeypatch.setattr(driver.plt, "close", record)
+    monkeypatch.setattr(driver, "run_forward_simulation", forbidden)
+    monkeypatch.setattr(driver, "build_initial_model", forbidden)
+    driver.render_saved_forward(root, backend="sbp_sat", theta_deg=35., initial_model="bill_logs")
+    assert len(figures) == 2
+    for fig in figures:
+        ax = fig.axes[0]
+        assert ax.get_xlim() == (-20., 20.)
+        assert ax.get_ylim() == (87., 10.)
+        assert not ax.patches
+        assert "sponge" not in ax.get_title().lower()
+        assert "boundary" not in ax.get_title().lower()
+    model_image = figures[0].axes[0].images[0]
+    gif_image = figures[1].axes[0].images[0]
+    # Model pixels keep the FULL data-to-coordinate transform; the axes crop it.
+    assert tuple(model_image.get_extent()) == (-32.5, 32.5, 111.5, 6.5)
+    np.testing.assert_array_equal(model_image.get_array(), values["vp"].T)
+    # GIF pixels are cropped, but stay at the SAME native physical centres.
+    assert tuple(gif_image.get_extent()) == (-22.5, 22.5, 87., 10.)
+    left, right, bottom, top = gif_image.get_extent()
+    rows, columns = gif_image.get_array().shape
+    np.testing.assert_array_equal(left+(np.arange(columns)+.5)*(right-left)/columns,
+                                  grid.x[2:-2])
+    np.testing.assert_array_equal(top+(np.arange(rows)+.5)*(bottom-top)/rows,
+                                  snapshots["snapshot_grid_z"][:11])
+    assert max(abs(v) for v in gif_image.get_clim()) < 2
+    assert before == {p.name: p.read_bytes() for p in root.glob("*.npz")}
+    with Image.open(root / "05_wavefield_vz_moment_tensor.gif") as gif:
+        assert gif.n_frames == 3
+
+
+def test_display_bounds_keep_top_and_use_physical_widths():
+    grid = Grid2D(1241, 1121, 5., 5., 2, .0001, x0=-2100.)
+    assert driver.forward_display_bounds(grid, sponge_side_width_m=600.,
+                                        sponge_bottom_width_m=600.) == (-1500.,3500.,0.,5000.)
+    assert driver.forward_display_bounds(grid) == (-2100.,4100.,0.,5600.)
+    assert driver.saved_sponge_widths({"sponge_rate_per_s":0.,
+                                      "sponge_side_width_m":600.,
+                                      "sponge_bottom_width_m":600.}) == (0.,0.)
+
+
+@pytest.mark.parametrize("side,bottom", [(-1.,0.), (float("nan"),0.), (30.,0.), (0.,98.)])
+def test_invalid_display_strip_widths_fail_instead_of_resizing_the_grid(side,bottom):
+    grid = Grid2D(13,15,5.,7.,2,.001,x0=-30.,z0=10.)
+    with pytest.raises(ValueError):
+        driver.forward_display_bounds(grid, sponge_side_width_m=side,
+                                      sponge_bottom_width_m=bottom)
+
+
+def test_active_saved_absorber_needs_its_own_widths():
+    with pytest.raises(ValueError,match="lacks widths"):
+        driver.saved_sponge_widths({"sponge_rate_per_s":80.})

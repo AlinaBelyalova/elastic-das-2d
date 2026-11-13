@@ -18,7 +18,7 @@ from src.das.receivers import Receivers2D
 from src.sbp_sat.simulator import prepare_simulation, estimate_storage
 
 
-def run_checks():
+def run_checks(sponge=None):
     grid = Grid2D(15, 17, 50.0, 40.0, 500, 0.0008, x0=-150.0, z0=0.0)
     x, z = np.indices(grid.shape)
     model = ElasticModel2D(
@@ -50,16 +50,16 @@ def run_checks():
     )
     L = 17.3
     run, das = run_forward_simulation(
-        model, source, rec, L, backend="sbp_sat", free_surface=True, snapshot_stride=100
+        model, source, rec, L, backend="sbp_sat", free_surface=True, snapshot_stride=100, sbp_sponge=sponge
     )
-    p = prepare_simulation(model, source, rec, L, execution="numba")
-    dense = prepare_simulation(model, source, rec, L, sparse_derivatives=False)
+    p = prepare_simulation(model, source, rec, L, execution="numba", sponge=sponge)
+    dense = prepare_simulation(model, source, rec, L, sparse_derivatives=False, sponge=sponge)
     reference = dense.solver.run_forward(
         source.stf.values, dense.source, dense.observation
     )
     amplitude = max(float(np.max(np.abs(reference.data))), np.finfo(float).tiny)
     parity_error = float(np.max(np.abs(das.data - reference.data)) / amplitude)
-    csr = prepare_simulation(model, source, rec, L)
+    csr = prepare_simulation(model, source, rec, L, sponge=sponge)
     csr_data = csr.solver.run_forward(
         source.stf.values, csr.source, csr.observation
     ).data
@@ -79,7 +79,7 @@ def run_checks():
     mt = np.array([source.m2d.Mxx, source.m2d.Mzz, source.m2d.Mxz])
     source_error = float(np.max(np.abs(np.array(integrals) - mt)) / np.max(np.abs(mt)))
     truth = ElasticModel2D(grid, model.vp * 1.01, model.vs * 0.99, model.rho)
-    pt = prepare_simulation(truth, source, rec, L)
+    pt = prepare_simulation(truth, source, rec, L, sponge=sponge)
     observed = pt.solver.run_forward(source.stf.values, pt.source, pt.observation).data
     J, data, gp, gs = p.solver.objective_and_gradient_log_vp_vs(
         source.stf.values, observed, p.source, p.observation
@@ -94,7 +94,7 @@ def run_checks():
         mm = ElasticModel2D(
             grid, model.vp * np.exp(eps * u), model.vs * np.exp(eps * v), model.rho
         )
-        pp = prepare_simulation(mm, source, rec, L, execution="numba")
+        pp = prepare_simulation(mm, source, rec, L, execution="numba", sponge=sponge)
         d = pp.solver.run_forward(source.stf.values, pp.source, pp.observation).data
         j = 0.5 * grid.dt * float(np.sum((d - observed) ** 2))
         remainders.append(abs(j - J - eps * derivative))
@@ -115,6 +115,7 @@ def run_checks():
         ),
         problem="manufactured SI medium; inherited numerical 2-D moment amplitude",
         solver_backend="sbp_sat",
+        boundary_scheme=run.solver_metadata["boundary_scheme_version"],
         sparse_dense_relative_error=csr_error,
         numba_dense_relative_error=parity_error,
         solver_execution="numba",
@@ -150,7 +151,7 @@ def run_checks():
         taylor_slopes=slopes.tolist(),
         storage=estimate_storage(grid, rec.nrec, 100),
         limitations=[
-            "first-order impedance, not PML",
+            "first-order impedance, not PML" if sponge is None else "Gaussian sponge: first-order time splitting in strips; not PML",
             "no absolute 3-D earthquake-moment amplitude calibration",
             "This QC exercises full history; checkpoint_qc checks exact checkpoint/replay.",
         ],
@@ -187,6 +188,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--sponge", action="store_true", help="Also exercise the restored native Gaussian sponge")
     args = parser.parse_args()
     if (
         args.output_dir
@@ -197,7 +199,8 @@ def main():
         raise SystemExit(
             "Output directory is not empty; choose another or use --overwrite."
         )
-    report, package = run_checks()
+    from src.sbp_sat.sponge import GaussianSponge
+    report, package = run_checks(GaussianSponge(100., 120., 80.) if args.sponge else None)
     print(json.dumps(report, indent=2, allow_nan=False))
     if args.output_dir:
         args.output_dir.mkdir(parents=True, exist_ok=True)

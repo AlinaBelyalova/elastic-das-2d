@@ -5,6 +5,23 @@ next steps and open questions are kept here. Where things are: [project map](pro
 
 ## Focus: opt-in SBP-SAT backend in the SAFOD forward pipeline
 
+Current user-directed boundary choice: restore the legacy Gaussian sponge
+on the SBP native grids, keep the SBP free surface and explicit full domain.
+The event driver now enables 600 m side/bottom strips, gamma=80 1/s, inside
+x=-2100..4100 m, z=0..5600 m. No extra grid cells or inner rectangle.
+PML is deferred. [Sponge equations, tests and commands](sbp_sat/sponge.md).
+Local targeted tests: 228 pass; source/DAS transpose error 8.22e-15, model
+Taylor rates about 2 and exact full-history/checkpoint parity. Packets show
+residual grazing reflection; no real-event removal claim is made before
+rerunning on Sherlock. The paragraphs below retain the history of the
+impedance-only implementation and audit.
+
+Display preference updated 2026-10-29: hide the actual absorbing strips in
+the model PNG/GIF. The default viewport is x=-1500..3500 m, z=0..5000 m;
+full computational arrays and numerical settings are unchanged. Saved
+rendering uses the stored sponge parameters and leaves NPZ bytes unchanged.
+Targeted display/native-coordinate and driver/save checks: 19 pass.
+
 `src/sbp_sat/` is a separate NumPy prototype: periodic x, free top
 and bottom boundaries, point or off-grid finite-gauge DAS receivers,
 exact discrete adjoint and gradient with
@@ -88,9 +105,9 @@ error before discretization, not a measured SAFOD reflection coefficient.
 The previous normal-P packet test did not cover this limitation.
 Fresh manufactured-model checks reproduce the energy identity (relative
 balance error 2.19e-16), exact checkpoint parity and quadratic Taylor rates.
-These validate the current operator, not boundary transparency. The next
-gated work is an SBP-compatible CFS-PML on sides/bottom, then discrete
-reflection tests and its complete auxiliary-state adjoint/checkpoints.
+These validate the impedance-only operator, not boundary transparency.
+The subsequent PML proposal is deferred in favor of the restored Gaussian
+sponge described above.
 See [boundary_plan.md](sbp_sat/boundary_plan.md). No PML has been enabled.
 
 ## Latest verified runs

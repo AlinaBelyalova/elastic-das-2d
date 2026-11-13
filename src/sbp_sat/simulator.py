@@ -1,6 +1,6 @@
 """SBP-SAT adapter for the existing model/source/receiver/DAS pipeline.
 
-No model resampling, sponge, moment rescaling or change of DAS observable.
+No model resampling, moment rescaling or change of DAS observable.
 Grid2D points are the normal-stress grid, including both physical endpoints.
 """
 
@@ -74,6 +74,7 @@ def prepare_simulation(
     sparse_derivatives=True,
     execution=None,
     numba_threads=None,
+    sponge=None,
 ):
     """Shared setup for production forward, source adjoint and model gradient."""
     g = model.grid
@@ -86,16 +87,26 @@ def prepare_simulation(
     bc = BoundaryConditions(top="free" if free_surface else "absorbing")
     if execution == "numba":
         from .numba_solver import NumbaSBPSAT
-
-        f = NumbaSBPSAT(coefficients, g.dx, g.dz, g.dt, bc, numba_threads=numba_threads)
+        if sponge is None:
+            f = NumbaSBPSAT(coefficients, g.dx, g.dz, g.dt, bc, numba_threads=numba_threads)
+        else:
+            from .sponge import NumbaSpongeSBPSAT
+            f = NumbaSpongeSBPSAT(coefficients, g.dx, g.dz, g.dt, bc,
+                                 numba_threads=numba_threads, sponge=sponge)
     else:
-        f = RectangularSBPSAT(
-            coefficients, g.dx, g.dz, g.dt, bc, sparse_derivatives=execution == "csr"
-        )
+        if sponge is None:
+            f = RectangularSBPSAT(coefficients, g.dx, g.dz, g.dt, bc,
+                                 sparse_derivatives=execution == "csr")
+        else:
+            from .sponge import SpongeSBPSAT
+            f = SpongeSBPSAT(coefficients, g.dx, g.dz, g.dt, bc,
+                            sparse_derivatives=execution == "csr", sponge=sponge)
     src = build_moment_source(f, source, g)
     obs = build_rectangular_das_observation(
         f, receivers, gauge_length_m, x0=g.x0, z0=g.z0
     )
+    if sponge is not None:
+        f.validate_undamped_support(src, obs)
     return PreparedSimulation(f, src, obs)
 
 
@@ -141,6 +152,7 @@ def run_forward_simulation(
     free_surface=True,
     execution="numba",
     numba_threads=None,
+    sponge=None,
 ):
     """Return the existing ElasticRunResult/DASResult interfaces.
 
@@ -161,6 +173,7 @@ def run_forward_simulation(
         free_surface=free_surface,
         execution=execution,
         numba_threads=numba_threads,
+        sponge=sponge,
     )
     f, src, obs = prepared.solver, prepared.source, prepared.observation
     g = model.grid
@@ -237,7 +250,14 @@ def run_forward_simulation(
         boundary_bottom=f.boundaries.bottom,
         boundary_left=f.boundaries.left,
         boundary_right=f.boundaries.right,
-        boundary_method="traction SAT + first-order impedance; no sponge or PML",
+        boundary_method=("traction SAT + first-order impedance; no sponge or PML"
+                         if sponge is None else
+                         "traction SAT + first-order impedance + native Gaussian sponge; no PML"),
+        boundary_scheme_version="impedance_v1" if sponge is None else "impedance_gaussian_sponge_v1",
+        sponge_side_width_m=0.0 if sponge is None else sponge.side_width_m,
+        sponge_bottom_width_m=0.0 if sponge is None else sponge.bottom_width_m,
+        sponge_rate_per_s=0.0 if sponge is None else sponge.rate_per_s,
+        sponge_time_split="disabled" if sponge is None else "post_step_first_order_legacy_style",
         sbp_dt_sufficient_limit_s=f.dt_limit,
         source_spatial_normalization="bilinear_transpose_divided_by_native_SBP_quadrature",
         source_amplitude_convention="existing_2d_tensor_scale; no_3d_to_2d_conversion",
@@ -272,6 +292,7 @@ def objective_and_gradient_log_vp_vs(
     free_surface=True,
     execution="numba",
     checkpoint_interval="auto",
+    sponge=None,
 ):
     """Same physical source/DAS chain as forward; fixed rho/dt/source/geometry.
 
@@ -286,6 +307,7 @@ def objective_and_gradient_log_vp_vs(
         gauge_length_m,
         free_surface=free_surface,
         execution=execution,
+        sponge=sponge,
     )
     return p.solver.objective_and_gradient_log_vp_vs(
         source.stf.values,

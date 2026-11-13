@@ -36,7 +36,13 @@ from src.safod.models import (
     build_initial_model,
     fault_x_at_z,
 )
-from src.elastic.source import build_dc_source
+from src.elastic.source import build_dc_source, build_source_2d
+from src.safod.focal_mechanism import (
+    COMCAT_MECHANISM,
+    MANUAL_MECHANISM,
+    load_projected_comcat_source,
+    validate_saved_source_mechanism,
+)
 from src.common.grid import Grid2D
 from src.common.model import ElasticModel2D
 from src.das.receivers import (
@@ -49,7 +55,9 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.interpolate import RegularGridInterpolator
 
 from scripts.safod.settings import (
-    DEFAULT_THETA_DEG,
+    FOCAL_MECHANISM_CATALOG,
+    add_source_mechanism_arguments,
+    parse_source_mechanism_arguments,
     REAL_EVENT_PACKAGE,
     SAFOD_SCIENTIFIC_X_MAX_M,
     SAFOD_SCIENTIFIC_X_MIN_M,
@@ -60,6 +68,8 @@ from scripts.safod.settings import (
     SBP_X_MIN_M,
     SBP_X_MAX_M,
     SBP_Z_MAX_M,
+    SBP_SPONGE_WIDTH_M,
+    SBP_SPONGE_RATE_PER_S,
 )
 
 # ==============================================================================
@@ -323,6 +333,8 @@ def load_real_event_package(path: Path) -> dict:
                 )
             ),
             "real_raw_channels": real_raw_channels,
+            "profile_u_e": float(get_scalar("profile_u_e", np.nan)),
+            "profile_u_n": float(get_scalar("profile_u_n", np.nan)),
         }
 
     if real_raw_channels.ndim != 1:
@@ -1282,13 +1294,13 @@ def make_wavefield_gif(
     max_frames: int = 80,
     percentile_clip: float = 99.5,
     plot_z_min_m: float | None = None,
-    domain_label: str = "Full computational domain",
+    domain_label: str = "SAFOD model",
 ) -> None:
     """
     Draw saved native Vz samples over the requested physical bounds.
 
-    The event driver passes the full material grid. Pixel edges are half a
-    native spacing from sample centres. No internal reference region is drawn.
+    Pixel edges remain half a native spacing from their sample centres.
+    The viewport may exclude absorbing strips; no grid is rebuilt or shifted.
     """
     snapshots_vz = np.asarray(snapshots_vz, dtype=np.float64)
     snapshot_times = np.asarray(snapshot_times, dtype=np.float64)
@@ -1330,13 +1342,16 @@ def make_wavefield_gif(
     if not np.isfinite(plot_z_min_m) or plot_z_min_m >= plot_z_max_m:
         raise ValueError("GIF depth limits must be finite and increasing.")
 
+    # Keep pixels with positive overlap, not a row touching only the viewport
+    # edge. In particular, an invisible bottom-sponge row must not affect the
+    # colour scale of the visible native Vz samples.
     x_keep = (
-        (x_grid >= float(plot_x_min_m) - 0.5 * grid.dx)
-        & (x_grid <= float(plot_x_max_m) + 0.5 * grid.dx)
+        (x_grid + 0.5 * grid.dx > float(plot_x_min_m))
+        & (x_grid - 0.5 * grid.dx < float(plot_x_max_m))
     )
     z_keep = (
-        (z_grid >= plot_z_min_m - 0.5 * grid.dz)
-        & (z_grid <= float(plot_z_max_m) + 0.5 * grid.dz)
+        (z_grid + 0.5 * grid.dz > plot_z_min_m)
+        & (z_grid - 0.5 * grid.dz < float(plot_z_max_m))
     )
 
     ix = np.flatnonzero(x_keep)
@@ -1587,11 +1602,34 @@ def make_wavefield_gif(
 
 
 def forward_domain_label(backend, free_surface):
-    return (
-        "Full computational domain\nTop: free; sides/bottom: impedance SAT"
-        if backend == "sbp_sat" and free_surface
-        else "Full computational domain"
-    )
+    return "SAFOD model"
+
+
+def forward_display_bounds(grid, *, sponge_side_width_m=0.0, sponge_bottom_width_m=0.0):
+    """Hide actual absorbing strips in figures; keep the computational grid."""
+    side, bottom_width = float(sponge_side_width_m), float(sponge_bottom_width_m)
+    if not np.isfinite([side, bottom_width]).all() or side < 0 or bottom_width < 0:
+        raise ValueError("Display sponge widths must be finite and nonnegative.")
+    left, right = float(grid.x[0]) + side, float(grid.x[-1]) - side
+    top, bottom = float(grid.z[0]), float(grid.z[-1]) - bottom_width
+    if left >= right or top >= bottom:
+        raise ValueError("Absorbing strips leave no display area.")
+    return left, right, top, bottom
+
+
+def saved_sponge_widths(package):
+    """Read the saved run's absorber, never today's settings or old plot bounds."""
+    rate = float(package["sponge_rate_per_s"] if "sponge_rate_per_s" in package
+                 else package["gamma_s"] if "gamma_s" in package else 0.0)
+    if not np.isfinite(rate) or rate < 0:
+        raise ValueError("Saved sponge rate must be finite and nonnegative.")
+    if rate == 0:
+        return 0.0, 0.0
+    side_key = "sponge_side_width_m" if "sponge_side_width_m" in package else "sponge_width_x_m"
+    bottom_key = "sponge_bottom_width_m" if "sponge_bottom_width_m" in package else "sponge_width_z_m"
+    if side_key not in package or bottom_key not in package:
+        raise ValueError("Saved active sponge lacks widths; cannot choose the display area.")
+    return float(package[side_key]), float(package[bottom_key])
 
 
 def save_forward_domain_figures(
@@ -1607,10 +1645,14 @@ def save_forward_domain_figures(
     *,
     backend,
     free_surface,
+    sponge_side_width_m=0.0,
+    sponge_bottom_width_m=0.0,
 ):
-    """Model and Vz GIF use exactly the full physical computational bounds."""
-    left, right = float(grid.x[0]), float(grid.x[-1])
-    top, bottom = float(grid.z[0]), float(grid.z[-1])
+    """Model and native Vz GIF share a viewport outside the absorbing strips."""
+    left, right, top, bottom = forward_display_bounds(
+        grid, sponge_side_width_m=sponge_side_width_m,
+        sponge_bottom_width_m=sponge_bottom_width_m,
+    )
     label = forward_domain_label(backend, free_surface)
     fig, ax = plot_safod_model(
         grid=grid,
@@ -1624,15 +1666,16 @@ def save_forward_domain_figures(
         show_offset_segment=True,
     )
     # N-N Vp samples sit at grid nodes, including the physical endpoints.
-    # Half-pixel extent keeps centres at their actual coordinates; the axes
-    # clip the two outer half-pixels at the physical boundary.
+    # Keep the FULL array's data-to-coordinate transform. Cropping only the
+    # axes hides the strips; using viewport bounds as the image extent would
+    # stretch the material and move its features relative to the source.
     if ax.images:
         ax.images[0].set_extent(
             (
-                left - grid.dx / 2,
-                right + grid.dx / 2,
-                bottom + grid.dz / 2,
-                top - grid.dz / 2,
+                float(grid.x[0]) - grid.dx / 2,
+                float(grid.x[-1]) + grid.dx / 2,
+                float(grid.z[-1]) + grid.dz / 2,
+                float(grid.z[0]) - grid.dz / 2,
             )
         )
     ax.scatter(
@@ -1694,12 +1737,14 @@ def render_saved_forward(out_dir, *, backend, theta_deg, initial_model):
             raise ValueError(
                 "Requested backend differs from the saved forward package."
             )
-        if str(package["initial_model_name"].item()) != initial_model or not np.isclose(
-            float(package["source_theta_deg"]), theta_deg, rtol=0, atol=1e-9
-        ):
+        if str(package["initial_model_name"].item()) != initial_model:
+            raise ValueError("Requested model/angle differs from the saved forward package.")
+        try:
+            validate_saved_source_mechanism(package, theta_deg)
+        except ValueError as exc:
             raise ValueError(
-                "Requested model/angle differs from the saved forward package."
-            )
+                f"Requested model/angle or source mechanism differs from the saved forward package: {exc}"
+            ) from exc
         x, z = package["grid_x"], package["grid_z"]
         grid = Grid2D(
             len(x),
@@ -1735,6 +1780,11 @@ def render_saved_forward(out_dir, *, backend, theta_deg, initial_model):
         )
         receivers_x, receivers_z = package["receiver_x"], package["receiver_z"]
         free_surface = bool(package["free_surface"])
+        sponge_side_width_m, sponge_bottom_width_m = saved_sponge_widths(package)
+        display_bounds = forward_display_bounds(
+            grid, sponge_side_width_m=sponge_side_width_m,
+            sponge_bottom_width_m=sponge_bottom_width_m,
+        )
     with np.load(snapshot_path, allow_pickle=False) as saved:
         snapshots, times = saved["snapshots_vz"], saved["snapshot_times_v"]
         expected_z = grid.z[:-1] + grid.dz / 2 if backend == "sbp_sat" else grid.z
@@ -1760,6 +1810,8 @@ def render_saved_forward(out_dir, *, backend, theta_deg, initial_model):
     print(
         f"Rendering saved grid {grid.nx}x{grid.nz}: x=[{x[0]}, {x[-1]}], z=[{z[0]}, {z[-1]}] m"
     )
+    print(f"Display only: x=[{display_bounds[0]}, {display_bounds[1]}], "
+          f"z=[{display_bounds[2]}, {display_bounds[3]}] m")
     save_forward_domain_figures(
         grid,
         model,
@@ -1772,6 +1824,8 @@ def render_saved_forward(out_dir, *, backend, theta_deg, initial_model):
         out_dir,
         backend=backend,
         free_surface=free_surface,
+        sponge_side_width_m=sponge_side_width_m,
+        sponge_bottom_width_m=sponge_bottom_width_m,
     )
     print("Saved-field rendering PASSED. Forward NPZ and DAS are unchanged.")
 
@@ -1783,8 +1837,8 @@ def render_saved_forward(out_dir, *, backend, theta_deg, initial_model):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the SAFOD initial-model elastic forward simulation for one "
-            "effective 2D double-couple orientation."
+            "Run the SAFOD initial-model elastic forward simulation with a trial "
+            "2D source angle or a projected ComCat focal mechanism."
         )
     )
 
@@ -1799,15 +1853,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--render-only", action="store_true",
                         help="Regenerate full-domain model PNG/GIF from existing NPZ and snapshots; skip propagation.")
 
+    add_source_mechanism_arguments(parser)
     parser.add_argument(
-        "--theta-deg",
-        type=float,
-        default=DEFAULT_THETA_DEG,
-        help=(
-            "Effective 2D double-couple orientation in degrees. "
-            "The current parameterisation requires 0 <= theta < 90. "
-            f"Default: {DEFAULT_THETA_DEG:.1f}."
-        ),
+        "--focal-mechanisms-file", type=Path, default=FOCAL_MECHANISM_CATALOG,
+        help="Local ComCat focal mechanism cache for --comcat-mechanism.",
     )
 
     parser.add_argument(
@@ -1859,12 +1908,12 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help=(
-            "Replace an existing forward NPZ package for the selected angle. "
+            "Replace an existing forward NPZ package for the selected source. "
             "Without this flag, an existing package aborts the run."
         ),
     )
 
-    return parser.parse_args()
+    return parse_source_mechanism_arguments(parser)
 
 
 # ==============================================================================
@@ -1873,12 +1922,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-
-    if not 0.0 <= args.theta_deg < 90.0:
-        raise ValueError(
-            "--theta-deg must satisfy 0 <= theta < 90 for the current "
-            "2D double-couple parameterisation."
-        )
 
     run_tag = forward_run_tag(args.theta_deg, args.backend)
     if args.render_only:
@@ -1899,9 +1942,22 @@ def main() -> None:
     real_event_package = REAL_EVENT_PACKAGE
 
     event_cfg = None
+    source_theta_deg = args.theta_deg if args.theta_deg is not None else np.nan
+    source_mechanism = COMCAT_MECHANISM if args.comcat_mechanism else MANUAL_MECHANISM
+    # Keep the same numerical amplitude scale for the controlled comparison.
+    source_scalar_moment = 1.0e12
+    comcat_tensor, comcat_metadata = None, {}
 
     if source_mode == "catalog_event":
         event_cfg = load_real_event_package(real_event_package)
+        if args.comcat_mechanism:
+            comcat_tensor, comcat_metadata = load_projected_comcat_source(
+                path=args.focal_mechanisms_file,
+                event_id=event_cfg["event_id"],
+                profile_u_e=event_cfg["profile_u_e"],
+                profile_u_n=event_cfg["profile_u_n"],
+                scalar_moment=source_scalar_moment,
+            )
         geom_file = event_cfg["geom_file"]
         # geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
         out_dir = (
@@ -1909,6 +1965,8 @@ def main() -> None:
             / args.initial_model
         )
     elif source_mode == "deep_saf":
+        if args.comcat_mechanism:
+            raise ValueError("--comcat-mechanism requires a prepared catalog event.")
         geom_file = "/home/groups/ettore88/alina/imaging/SAFOD_downleg_Projected_2D.csv"
         out_dir = Path("results/safod/initial_forward")
     else:
@@ -1932,7 +1990,12 @@ def main() -> None:
     print(f"solver backend: {args.backend}")
     if args.backend == "sbp_sat":
         print(f"SBP execution : {args.sbp_execution}")
-    print(f"theta         : {args.theta_deg:.1f} deg")
+    print(f"source        : {source_mechanism}")
+    if args.comcat_mechanism:
+        print(f"ComCat product: {comcat_metadata['source_comcat_product_code'].item()}")
+        print(f"strike/dip/rake [deg]: {comcat_metadata['source_comcat_strike_dip_rake_deg']}")
+    else:
+        print(f"theta         : {source_theta_deg:.1f} deg")
     print(f"initial model : {args.initial_model}")
     print(f"save GIF      : {args.save_gif}")
     print(f"output dir    : {out_dir}")
@@ -1955,10 +2018,15 @@ def main() -> None:
 
     half_order = 2
 
-    # The legacy sponge parameters do not configure the SBP boundary law.
+    # Material padding is zero for SBP; its sponge is explicitly INSIDE the grid.
     n_boundary = 0 if args.backend == "sbp_sat" else FORWARD_PADDING_CELLS
     gamma_s = 80.0
     free_surface = True
+    sbp_sponge = None
+    if args.backend == "sbp_sat":
+        from src.sbp_sat.sponge import GaussianSponge
+        sbp_sponge = GaussianSponge(SBP_SPONGE_WIDTH_M, SBP_SPONGE_WIDTH_M,
+                                    SBP_SPONGE_RATE_PER_S)
 
     # --------------------------------------------------------------------------
     # One explicit SBP domain; retain the legacy sponge layout for that backend.
@@ -1994,6 +2062,8 @@ def main() -> None:
         print("Chosen SBP domain (no appended cells)")
         print(f"x bounds: {computational_x_min_m:.1f} to {computational_x_max_m:.1f} m")
         print(f"z bounds: 0.0 to {computational_z_max_m:.1f} m")
+        print(f"Gaussian sponge INSIDE sides/bottom: {SBP_SPONGE_WIDTH_M:g} m, "
+              f"rate={SBP_SPONGE_RATE_PER_S:g} 1/s; top has no sponge")
     else:
         scientific_x_min_m = SAFOD_SCIENTIFIC_X_MIN_M
         scientific_x_max_m = SAFOD_SCIENTIFIC_X_MAX_M
@@ -2112,7 +2182,7 @@ def main() -> None:
         grid = model.grid
         print("\nSBP-SAT time grid (source is built afterward)")
         print(timing)
-        print("Sides/bottom: first-order impedance SAT at the chosen outer faces; no PML yet.")
+        print("Sides/bottom: restored Gaussian sponge + impedance SAT termination; no PML.")
     elif args.duration_s is not None:
         if not np.isfinite(args.duration_s) or args.duration_s <= 0:
             raise ValueError("--duration-s must be finite and positive.")
@@ -2414,8 +2484,6 @@ def main() -> None:
         x_src = float(event_cfg["x_src"])
         z_src = float(event_cfg["z_src"])
 
-        source_theta_deg = float(args.theta_deg)
-        source_scalar_moment = 1.0e12
         source_f0_hz = 10.0
 
         print("\nCatalog-event source")
@@ -2425,7 +2493,6 @@ def main() -> None:
         print(f"magnitude     : {event_cfg['magnitude']:.2f}")
         print(f"crossline     : {event_cfg['event_crossline_m']:.1f} m")
         print(f"x_src, z_src  : {x_src:.3f}, {z_src:.3f} m")
-        print(f"theta         : {source_theta_deg:.1f} deg")
         print(f"f0            : {source_f0_hz:.2f} Hz")
 
     elif source_mode == "deep_saf":
@@ -2453,8 +2520,6 @@ def main() -> None:
         x_src = float(x_fault_src - 80.0 + 0.37 * grid.dx)
         z_src = float(z_src + 0.61 * grid.dz)
 
-        source_theta_deg = float(args.theta_deg)
-        source_scalar_moment = 1.0e12
         source_f0_hz = 6.0
 
         print("\nDeep SAF synthetic source")
@@ -2490,11 +2555,10 @@ def main() -> None:
               and grid.z[0] + grid.dz / 2 <= z_src <= grid.z[-1] - grid.dz / 2):
         raise ValueError("Source is outside common SBP stress-grid support; no clipping.")
 
-    source = build_dc_source(
+    source_kwargs = dict(
         grid=grid,
         x_m=x_src,
         z_m=z_src,
-        theta_deg=source_theta_deg,
         scalar_moment=source_scalar_moment,
         nt=grid.nt,
         dt=grid.dt,
@@ -2503,6 +2567,13 @@ def main() -> None:
         source_time_mode="ricker_moment",
         spreading="bilinear",
     )
+
+    if comcat_tensor is None:
+        source = build_dc_source(theta_deg=source_theta_deg, **source_kwargs)
+    else:
+        source = build_source_2d(
+            mt2d=comcat_tensor, label="ComCat DC projected to x-z", **source_kwargs
+        )
 
     print("\nSource")
     print("------")
@@ -2552,7 +2623,8 @@ def main() -> None:
         print(estimate_storage(grid, receivers.nrec, snapshot_stride))
         if args.dry_run:
             prepare_simulation(model, source, receivers, gauge_length_m,
-                               free_surface=free_surface,execution=args.sbp_execution)
+                               free_surface=free_surface,execution=args.sbp_execution,
+                               sponge=sbp_sponge)
     if args.dry_run:
         print("Preflight PASSED. No wave propagation performed.")
         return
@@ -2560,10 +2632,25 @@ def main() -> None:
     # --------------------------------------------------------------------------
     # 5. Save model plot with source overlay
     # --------------------------------------------------------------------------
+    if sbp_sponge is not None:
+        display_side_width_m, display_bottom_width_m = (
+            (sbp_sponge.side_width_m, sbp_sponge.bottom_width_m)
+            if sbp_sponge.rate_per_s > 0 else (0.0, 0.0)
+        )
+    else:
+        display_side_width_m, display_bottom_width_m = (
+            (sponge_width_x_m, sponge_width_z_m) if gamma_s > 0 else (0.0, 0.0)
+        )
+    display_bounds = forward_display_bounds(
+        grid, sponge_side_width_m=display_side_width_m,
+        sponge_bottom_width_m=display_bottom_width_m,
+    )
     save_forward_domain_figures(
         grid, model, source, x_cable_use, z_cable_use, metadata,
         None, None, out_dir, backend=args.backend,
         free_surface=free_surface,
+        sponge_side_width_m=display_side_width_m,
+        sponge_bottom_width_m=display_bottom_width_m,
     )
 
     # --------------------------------------------------------------------------
@@ -2584,6 +2671,7 @@ def main() -> None:
         backend=args.backend,
         free_surface=free_surface,
         sbp_execution=args.sbp_execution,
+        sbp_sponge=sbp_sponge,
     )
     print("Forward simulation finished.")
 
@@ -2602,10 +2690,10 @@ def main() -> None:
             metadata=metadata,
             source=source,
             out_path=out_dir / "05_wavefield_vz_moment_tensor.gif",
-            plot_x_min_m=float(grid.x[0]),
-            plot_x_max_m=float(grid.x[-1]),
-            plot_z_min_m=float(grid.z[0]),
-            plot_z_max_m=float(grid.z[-1]),
+            plot_x_min_m=display_bounds[0],
+            plot_x_max_m=display_bounds[1],
+            plot_z_min_m=display_bounds[2],
+            plot_z_max_m=display_bounds[3],
             domain_label=forward_domain_label(args.backend, free_surface),
             fps=6,
             max_frames=80,
@@ -2832,6 +2920,9 @@ def main() -> None:
         event_crossline_m=np.array(event_cfg["event_crossline_m"] if event_cfg is not None else np.nan),
 
         source_theta_deg=np.array(source_theta_deg),
+        source_mechanism=np.array(source_mechanism),
+        source_moment_tensor_xz=source.m2d.as_matrix(),
+        **comcat_metadata,
         source_f0_hz=np.array(source_f0_hz),
         source_time_function_t0_s=np.array(float(source.stf.t0)),
         source_scalar_moment=np.array(source_scalar_moment),
@@ -2841,8 +2932,8 @@ def main() -> None:
         initial_model_name=np.array(
             args.initial_model
         ),
-        n_boundary=np.array(n_boundary if args.backend != "sbp_sat" else 0),
-        gamma_s=np.array(gamma_s if args.backend != "sbp_sat" else 0.0),
+        n_boundary=np.array(n_boundary if args.backend != "sbp_sat" else round(SBP_SPONGE_WIDTH_M / dx)),
+        gamma_s=np.array(gamma_s if args.backend != "sbp_sat" else SBP_SPONGE_RATE_PER_S),
         material_padding_cells=np.array(n_boundary),
         free_surface=np.array(free_surface),
         # Retain legacy keys for readers of older result packages. Padding is
@@ -2859,8 +2950,8 @@ def main() -> None:
         computational_x_max_m=np.array(computational_x_max_m),
         scientific_z_max_m=np.array(scientific_z_max_m),
         computational_z_max_m=np.array(computational_z_max_m),
-        sponge_width_x_m=np.array(sponge_width_x_m if args.backend != "sbp_sat" else 0.0),
-        sponge_width_z_m=np.array(sponge_width_z_m if args.backend != "sbp_sat" else 0.0),
+        sponge_width_x_m=np.array(sponge_width_x_m if args.backend != "sbp_sat" else SBP_SPONGE_WIDTH_M),
+        sponge_width_z_m=np.array(sponge_width_z_m if args.backend != "sbp_sat" else SBP_SPONGE_WIDTH_M),
         material_padding_width_x_m=np.array(sponge_width_x_m),
         material_padding_width_z_m=np.array(sponge_width_z_m),
 

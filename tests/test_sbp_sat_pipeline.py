@@ -1,5 +1,6 @@
 """Production source/STF -> bounded SBP -> receivers -> DAS -> saved comparison."""
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 import numpy as np
@@ -233,12 +234,38 @@ def test_safod_backend_paths_are_isolated_and_legacy_paths_are_unchanged():
         settings.forward_dir_for_theta(35, "unknown")
 
 
+def _trial_comcat_cache(tmp_path):
+    path = tmp_path / "focal_mechanisms.json"
+    path.write_text(json.dumps({"nc123": {
+        "code": "nc123_fm1",
+        "np1": {"strike": 0, "dip": 90, "rake": 0},
+        "review_status": "automatic",
+    }}))
+    return path
+
+
+@pytest.mark.parametrize("use_comcat", [False, True])
 def test_saved_sbp_package_passes_full_compare_with_shared_guides(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, use_comcat
 ):
     # Only the external 3-D eikonal predictor is stubbed; actual SBP, source,
     # sampling, DAS, package loading, filtering and all comparison plots run.
     m, src, r, L = case(nt=520)
+    source_metadata = {}
+    theta = 35
+    if use_comcat:
+        from src.safod.focal_mechanism import COMCAT_MECHANISM, load_projected_comcat_source
+
+        tensor, source_metadata = load_projected_comcat_source(
+            path=_trial_comcat_cache(tmp_path),
+            event_id="NC123",
+            profile_u_e=2**-0.5,
+            profile_u_n=2**-0.5,
+            scalar_moment=src.scalar_moment,
+        )
+        src = replace(src, m2d=tensor)
+        source_metadata["source_mechanism"] = COMCAT_MECHANISM
+        theta = None
     run, das = run_forward_simulation(
         m, src, r, L, backend="sbp_sat", free_surface=True
     )
@@ -254,10 +281,11 @@ def test_saved_sbp_package_passes_full_compare_with_shared_guides(
         das_raw_channels=channels[das.channel_indices],
         event_id="NC123",
         source_f0_hz=5,
-        source_theta_deg=35,
+        source_theta_deg=np.nan if use_comcat else theta,
+        **source_metadata,
         source_time_function_t0_s=src.stf.t0,
         initial_model_name="bill_logs",
-        run_tag=settings.forward_run_tag(35, "sbp_sat"),
+        run_tag=settings.forward_run_tag(theta, "sbp_sat"),
         model_type="manufactured",
     )
     rt = np.arange(-2.0, 2.01, 0.005)
@@ -294,8 +322,7 @@ def test_saved_sbp_package_passes_full_compare_with_shared_guides(
             "sbp_sat",
             "--initial-model",
             "bill_logs",
-            "--theta-deg",
-            "35",
+            *(["--comcat-mechanism"] if use_comcat else ["--theta-deg", "35"]),
             "--output-dir",
             str(out),
         ],
@@ -307,6 +334,11 @@ def test_saved_sbp_package_passes_full_compare_with_shared_guides(
     assert summary.synthetic_display_shift_s == pytest.approx(-src.stf.t0)
     assert summary.shared_3d_prediction_reference
     assert len(list(out.glob("*.png"))) == 4
+    if use_comcat:
+        assert summary.source_comcat_product_code == "nc123_fm1"
+        assert np.isnan(summary.theta_deg)
+    else:
+        assert summary.theta_deg == 35
     # A misplaced legacy package must be rejected before predictions/plotting.
     with np.load(syn) as pkg:
         values = {k: pkg[k] for k in pkg.files if k != "solver_backend"}
@@ -318,8 +350,9 @@ def test_saved_sbp_package_passes_full_compare_with_shared_guides(
 @pytest.mark.parametrize(
     "dry_run,save_gif", [(True, False), (False, False), (False, True)]
 )
+@pytest.mark.parametrize("use_comcat", [False, True])
 def test_actual_safod_driver_preflight_save_and_native_snapshot_axes(
-    tmp_path, monkeypatch, dry_run, save_gif
+    tmp_path, monkeypatch, dry_run, save_gif, use_comcat
 ):
     # Synthetic external model loader/geometry, actual driver/source/SBP/DAS/save.
     # The coarse anisotropic grid is an interface check, not a wave-accuracy QC.
@@ -341,6 +374,8 @@ def test_actual_safod_driver_preflight_save_and_native_snapshot_axes(
         ev_origin_time="2026-06-18T21:04:42Z",
         ev_mag=1.6,
         ev_depth_km=2.5,
+        profile_u_e=2**-0.5,
+        profile_u_n=2**-0.5,
         event_x_model_m=3.7,
         event_z_model_m=2501.2,
         gauge_length_m=17.3,
@@ -353,9 +388,11 @@ def test_actual_safod_driver_preflight_save_and_native_snapshot_axes(
     monkeypatch.setattr(driver, "SBP_X_MIN_M", -55.0)
     monkeypatch.setattr(driver, "SBP_X_MAX_M", 55.0)
     monkeypatch.setattr(driver, "SBP_Z_MAX_M", 5005.0)
+    monkeypatch.setattr(driver, "SBP_SPONGE_WIDTH_M", 5.0)
     root = tmp_path / "forward"
+    source_dir = "comcat" if use_comcat else "dc035"
     monkeypatch.setattr(
-        driver, "forward_dir_for_theta", lambda theta, backend: root / backend / "dc035"
+        driver, "forward_dir_for_theta", lambda theta, backend: root / backend / settings.theta_dir_name(theta)
     )
 
     def build_model(**kwargs):
@@ -395,10 +432,10 @@ def test_actual_safod_driver_preflight_save_and_native_snapshot_axes(
     def make_gif(**kwargs):
         g, s = kwargs["grid"], kwargs["snapshots_vz"]
         assert s.shape[1:] == g.shape
-        assert kwargs["plot_x_min_m"] == -55.0
-        assert kwargs["plot_x_max_m"] == 55.0
+        assert kwargs["plot_x_min_m"] == -50.0
+        assert kwargs["plot_x_max_m"] == 50.0
         assert kwargs["plot_z_min_m"] == 0.0
-        assert kwargs["plot_z_max_m"] == 5005.0
+        assert kwargs["plot_z_max_m"] == 5000.0
         gif.append(g)
 
     monkeypatch.setattr(driver, "make_wavefield_gif", make_gif)
@@ -408,8 +445,10 @@ def test_actual_safod_driver_preflight_save_and_native_snapshot_axes(
         "sbp_sat",
         "--initial-model",
         "bill_logs",
-        "--theta-deg",
-        "35",
+        *(
+            ["--comcat-mechanism", "--focal-mechanisms-file", str(_trial_comcat_cache(tmp_path))]
+            if use_comcat else ["--theta-deg", "35"]
+        ),
         "--duration-s",
         "1.2",
         "--save-gif" if save_gif else "--no-gif",
@@ -418,12 +457,18 @@ def test_actual_safod_driver_preflight_save_and_native_snapshot_axes(
         argv.append("--dry-run")
     monkeypatch.setattr("sys.argv", argv)
     driver.main()
-    output = root / "sbp_sat/dc035/bill_logs/outputs_safod_initial_forward.npz"
+    output = root / f"sbp_sat/{source_dir}/bill_logs/outputs_safod_initial_forward.npz"
     if dry_run:
         assert not output.exists() and not gif
         return
     with np.load(output) as pkg:
         assert str(pkg["solver_backend"]) == "sbp_sat"
+        if use_comcat:
+            assert pkg["source_comcat_product_code"].item() == "nc123_fm1"
+            np.testing.assert_allclose(
+                pkg["source_moment_tensor_xz"] / float(pkg["source_scalar_moment"]),
+                [[1.0, 0.0], [0.0, 0.0]], atol=1e-14,
+            )
         assert float(pkg["source_x"]) == 3.7 and float(pkg["source_z"]) == 2501.2
         assert float(pkg["source_time_function_t0_s"]) == 0.12
         assert float(pkg["velocity_time_offset_steps"]) == 0.5
@@ -433,8 +478,9 @@ def test_actual_safod_driver_preflight_save_and_native_snapshot_axes(
         np.testing.assert_array_equal(
             pkg["das_raw_channels"], channels[pkg["das_channel_indices"]]
         )
-        assert int(pkg["n_boundary"]) == 0 and float(pkg["gamma_s"]) == 0
-        assert float(pkg["sponge_width_x_m"]) == 0
+        assert int(pkg["n_boundary"]) == 1 and float(pkg["gamma_s"]) == 80
+        assert float(pkg["sponge_width_x_m"]) == 5
+        assert str(pkg["boundary_scheme_version"]) == "impedance_gaussian_sponge_v1"
         assert int(pkg["material_padding_cells"]) == 0
         assert str(pkg["x_domain_mode"]) == "explicit_computational_bounds"
         assert float(pkg["scientific_x_min_m"]) == float(pkg["grid_x"][0])

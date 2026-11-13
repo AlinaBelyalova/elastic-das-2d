@@ -170,6 +170,33 @@ replaces an existing forward package; retain the intended --nt when rerunning
 (default 12000 steps). The full comparison needs PyKonal and EikoHypoTomo,
 installed in geo, while the forward model runs in fwi.
 
+For a run constrained by the catalogue focal mechanism, use:
+
+```bash
+mkdir -p results/events/logs
+SAFOD_EVENT_KEY=nc75379261 SAFOD_SOURCE_MECHANISM=comcat \
+  sbatch scripts/safod/run_forward_sbp_sat.sbatch
+```
+
+The wrapper passes `--comcat-mechanism` to forward and compare. The
+default cache is `results/safod_deep/catalog/focal_mechanisms.json` (from
+`web_safod.scripts.fetch_focal_mechanisms`); direct forward runs can override
+it with `--focal-mechanisms-file`. Missing entries or missing prepared profile
+directions fail explicitly. Use `--theta-deg` for a trial 2-D source. Forward,
+compare and render-only select `comcat/<model>/` separately from the manual
+`dc035/<model>/` outputs. No network request is made during forward.
+
+The source is a point double couple built from NP1 in north/east/down
+coordinates. NP1 and NP2 represent the same double couple up to catalogue
+rounding; this does not identify the physical rupture plane. The model's
+basis is the saved along-profile horizontal unit vector and vertical down.
+The solver injects all three independent entries of the x-z block, including
+its in-plane trace, with the same numerical moment scale as the manual run.
+No trace removal, amplitude renormalization or absolute 3-D amplitude
+calibration is applied. Out-of-plane SH motion is outside the 2-D solver.
+The forward NPZ records the product code, angles, basis, original unit 3-D
+tensor and injected 2-D tensor.
+
 Predicted P/S on both real and synthetic panels use one shared set of native
 Zhang 2009 3-D eikonal times, switching to original Lin 2010 Vp/Vs on Zhang
 coverage errors. One EikoHypoTomo calculation uses the catalogue source and
@@ -179,7 +206,7 @@ waveform remains 2-D and need not match this 3-D reference exactly. The
 elastic solver. Geometry, numerical checks, commands and output conventions
 are documented in [travel_times.md](travel_times.md).
 
-Ordinary comparison output is the existing compare/dc<theta>/<model>/
+Ordinary comparison output is the matching comparison
 directory, including prediction CSV/JSON and the usual PNGs. No separate
 eikonal_3d directory is created. The configured 0-20 Hz comparison filter
 is implemented as a 20 Hz low-pass; positive lower corners retain bandpass
@@ -196,8 +223,8 @@ waveform display shift are preserved. The real-only plot retains pre-event data.
   (the default angle of both is `DEFAULT_THETA_DEG = 35.0`). `compare_event`
   looks for `forward/dc<θ>/<model>/outputs_safod_initial_forward.npz`: if the
   package is missing, it stops with `Synthetic package not found`; if the
-  model in the package differs, with `ValueError`. So `--theta-deg` and
-  `--initial-model` are always passed to both explicitly and identically. The
+  model in the package differs, with `ValueError`. Pass the same source
+  selection and `--initial-model` to both programs. The
   choice of model and angle is a scientific decision (handoff §31–32); this
   document does not make it.
 - Allowed models (`AVAILABLE_INITIAL_MODELS` in
@@ -207,7 +234,7 @@ waveform display shift are preserved. The real-only plot retains pre-event data.
   `hybrid_zhang2009_boness2006_bill_logs_smooth`.
 - `<θ>` is an integer number of degrees, `0 <= θ < 90`: the three-digit
   folder `dc<θ>` (`dc035`) is built by `theta_dir_name()`; a non-integer angle
-  raises an error. All saved runs are currently in `dc035`.
+  raises an error.
 - Without `--overwrite`, `run_forward` does not overwrite an existing package;
   `--no-gif` disables field snapshots and GIF; `--nt` is the number of steps
   (default 12000).

@@ -17,7 +17,8 @@ except ImportError as exc:
 from scripts.safod.settings import (
     COMMON_FMAX_HZ,
     COMMON_FMIN_HZ,
-    DEFAULT_THETA_DEG,
+    add_source_mechanism_arguments,
+    parse_source_mechanism_arguments,
     FILTER_ORDER,
     FILTER_TAPER_FRAC,
     GEOMETRY_CSV,
@@ -30,6 +31,7 @@ from scripts.safod.settings import (
 )
 from src.common.signal_processing import bandpass_traces, median_welch_psd
 from src.safod.models import AVAILABLE_INITIAL_MODELS
+from src.safod.focal_mechanism import validate_saved_source_mechanism
 from src.safod.travel_times import (
     add_travel_time_arguments, prediction_options, regional_model_from_args,
     receivers_from_channels,
@@ -234,7 +236,7 @@ def nearest_geometry_channel_for_receivers(
 # =============================================================================
 
 def synthetic_package_for_model(
-    theta_deg: float,
+    theta_deg: float | None,
     initial_model: str,
     backend: str = "numba_fused",
 ) -> Path:
@@ -252,7 +254,7 @@ def synthetic_package_for_model(
 
 
 def comparison_dir_for_model(
-    theta_deg: float,
+    theta_deg: float | None,
     initial_model: str,
     backend: str = "numba_fused",
 ) -> Path:
@@ -981,12 +983,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
 
-    parser.add_argument(
-        "--theta-deg",
-        type=float,
-        default=DEFAULT_THETA_DEG,
-        help=f"Effective 2-D source orientation. Default: {DEFAULT_THETA_DEG:.1f}.",
-    )
+    add_source_mechanism_arguments(parser)
 
     parser.add_argument(
         "--initial-model",
@@ -1001,7 +998,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--arrivals-only", action="store_true",
                         help="Save shared 3-D predictions for real and synthetic panels without filtering waveforms.")
     add_travel_time_arguments(parser)
-    return parser.parse_args()
+    return parse_source_mechanism_arguments(parser)
 
 
 # =============================================================================
@@ -1010,9 +1007,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-
-    if not 0.0 <= args.theta_deg < 90.0:
-        raise ValueError("--theta-deg must satisfy 0 <= theta < 90.")
 
     requested_run_tag = forward_run_tag(args.theta_deg, args.backend)
 
@@ -1033,7 +1027,10 @@ def main() -> None:
 
     print("\nComparison inputs")
     print("=================")
-    print(f"requested theta : {args.theta_deg:.1f} deg")
+    if args.comcat_mechanism:
+        print("requested source: projected ComCat mechanism")
+    else:
+        print(f"requested theta : {args.theta_deg:.1f} deg")
     print(f"initial model   : {args.initial_model}")
     print(f"solver backend  : {args.backend}")
     print(f"run tag         : {requested_run_tag}")
@@ -1110,18 +1107,7 @@ def main() -> None:
         # function at catalogue origin. No empirical/manual alignment.
         synthetic_display_shift_s = -source_time_function_t0_s
 
-        if not np.isfinite(source_theta_deg):
-            raise ValueError("Missing/invalid source_theta_deg.")
-
-        if not np.isclose(
-            source_theta_deg,
-            args.theta_deg,
-            rtol=0.0,
-            atol=1.0e-9,
-        ):
-            raise ValueError(
-                "Requested theta does not match synthetic package."
-            )
+        comcat_product_code = validate_saved_source_mechanism(synthetic, args.theta_deg)
 
         package_run_tag = str(
             get_scalar(
@@ -1390,7 +1376,10 @@ def main() -> None:
         print(f"model type               : {model_type}")
         print(f"source f0                : {source_f0_hz:.2f} Hz")
         print(f"source STF t0            : {source_time_function_t0_s:.6f} s")
-        print(f"source theta             : {source_theta_deg:.2f} deg")
+        if comcat_product_code:
+            print(f"source ComCat product    : {comcat_product_code}")
+        else:
+            print(f"source theta             : {source_theta_deg:.2f} deg")
         print(
             "common comparison band   : "
             f"{FMIN_COMPARE_HZ:.1f} to "
@@ -1438,6 +1427,7 @@ def main() -> None:
                     "run_tag": requested_run_tag,
                     "solver_backend": package_backend,
                     "theta_deg": source_theta_deg,
+                    "source_comcat_product_code": comcat_product_code,
                     "source_f0_hz": source_f0_hz,
                     "source_time_function_t0_s": source_time_function_t0_s,
                     "common_fmin_hz": FMIN_COMPARE_HZ,

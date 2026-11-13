@@ -1,5 +1,11 @@
 # Boundary audit and implementation plan
 
+Current user-directed choice (2026-10-28): restore the original Gaussian
+absorbing strips, keep SBP/free surface and one fully displayed grid.
+See [sponge.md](sponge.md). PML development is deferred. The audit and PML
+plan below are retained as the history of the earlier proposal, not the
+current event configuration or a claim that a PML change is required.
+
 Status: 2026-10-28. The current solver has an energy-stable local impedance
 condition, not PML. This audit does not claim that the observed real-event
 reflections have already been removed.
